@@ -1,0 +1,29 @@
+[project]
+name = "product-validator"
+version = "0.1.0"
+description = "Phase 1 Product Validator built with Python and Google ADK integration"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "httpx>=0.27.0",
+  "pytrends>=4.9.2",
+  "google-adk",
+  "pydantic>=2.7.0",
+  "praw>=7.7.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.0"
+]
+
+[project.scripts]
+product-validator = "product_validator.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
