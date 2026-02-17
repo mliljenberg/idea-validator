@@ -21,6 +21,8 @@ class CompetitorValidation(BaseModel):
     recommendation: Literal["proceed", "pivot", "abandon"]
     signal_score: int = Field(ge=0, le=100)
     confidence: Literal["low", "medium", "high"]
+    evidence_strength: int = Field(default=0, ge=0, le=100)
+    evidence_quality: Literal["weak", "moderate", "strong"] = "weak"
     identified_competitors: list[str] = Field(default_factory=list)
     feature_gaps: list[str] = Field(default_factory=list)
     pricing_insights: str = ""

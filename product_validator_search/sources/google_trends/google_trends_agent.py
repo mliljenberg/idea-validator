@@ -28,6 +28,8 @@ class GoogleTrendsValidation(BaseModel):
     recommendation: Literal["proceed", "pivot", "abandon"]
     signal_score: int = Field(ge=0, le=100)
     confidence: Literal["low", "medium", "high"]
+    evidence_strength: int = Field(default=0, ge=0, le=100)
+    evidence_quality: Literal["weak", "moderate", "strong"] = "weak"
     key_findings: list[str] = Field(default_factory=list)
     trend_direction: Literal["rising", "stable", "declining", "volatile", "no_data"] = (
         "no_data"

@@ -36,6 +36,18 @@ The output includes a final `conclusion_paragraph` that summarizes why the idea 
 It also includes `source_diagnostics` so you can see query terms, per-source hit counts, and any source-specific errors.
 The decision layer is hybrid: rule-based baseline plus Gemini-based analysis when `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) is set.
 
+## v2 signal coverage
+
+Buyer-intent expansion adds:
+- `review_sites` (G2/Capterra/Trustpilot snippets)
+- `jobs_signal` (hiring urgency proxy)
+- `seo_intent` (transactional vs informational demand proxy)
+
+Final synthesis now includes:
+- Evidence quality scoring
+- Contradiction detection and penalty
+- Confidence calibration (caps high confidence on weak source agreement)
+
 ## ADK App
 
 ```python
@@ -62,4 +74,5 @@ CRUNCHBASE_API_KEY=xxx
 GOOGLE_API_KEY=xxx
 PV_ENABLE_LLM_ANALYSIS=true
 PV_LLM_ANALYSIS_MODEL=gemini-3.0-flash
+BRAVE_SEARCH_API_KEY=xxx
 ```

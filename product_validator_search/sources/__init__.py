@@ -5,6 +5,9 @@ from .reddit import reddit_agent, RedditValidation
 from .github import github_agent, GitHubValidation
 from .brave_search import brave_search_agent, BraveSearchValidation
 from .competitors import competitors_agent, CompetitorValidation
+from .review_sites import review_sites_agent, ReviewSitesValidation
+from .jobs_signal import jobs_signal_agent, JobsSignalValidation
+from .seo_intent import seo_intent_agent, SeoIntentValidation
 
 __all__ = [
     "hackernews_agent",
@@ -21,4 +24,10 @@ __all__ = [
     "BraveSearchValidation",
     "competitors_agent",
     "CompetitorValidation",
+    "review_sites_agent",
+    "ReviewSitesValidation",
+    "jobs_signal_agent",
+    "JobsSignalValidation",
+    "seo_intent_agent",
+    "SeoIntentValidation",
 ]

@@ -6,11 +6,15 @@ Architecture:
   │     └── plan_generator (LlmAgent)
   │           output_schema: ResearchPlan → state "research_plan"
   └── sub_agent: execution_pipeline (SequentialAgent)
-        ├── market_research (ParallelAgent)
+        ├── market_research (ResilientParallelAgent)
         │     ├── brave_search_agent  → state "brave_search_validation"
         │     ├── google_trends_agent → state "google_trends_validation"
         │     └── competitors_agent   → state "competitors_validation"
-        ├── community_tech_research (ParallelAgent)
+        ├── buyer_intent_research (ResilientParallelAgent)
+        │     ├── review_sites_agent  → state "review_sites_validation"
+        │     ├── jobs_signal_agent   → state "jobs_signal_validation"
+        │     └── seo_intent_agent    → state "seo_intent_validation"
+        ├── community_tech_research (ResilientParallelAgent)
         │     ├── hackernews_agent    → state "hackernews_validation"
         │     ├── reddit_agent        → state "reddit_validation"
         │     ├── github_agent        → state "github_validation"
@@ -26,12 +30,13 @@ import datetime
 import os
 from typing import Literal
 
-from google.adk.agents import LlmAgent, ParallelAgent, SequentialAgent
+from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel, Field
 
 from .config import config
+from .resilient_parallel_agent import ResilientParallelAgent
 from .sources.hackernews import hackernews_agent
 from .sources.openalex import openalex_agent
 from .sources.google_trends import google_trends_agent
@@ -39,6 +44,9 @@ from .sources.reddit import reddit_agent
 from .sources.github import github_agent
 from .sources.brave_search import brave_search_agent
 from .sources.competitors import competitors_agent
+from .sources.review_sites import review_sites_agent
+from .sources.jobs_signal import jobs_signal_agent
+from .sources.seo_intent import seo_intent_agent
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas for structured agent outputs
@@ -52,6 +60,9 @@ SOURCE_NAMES = [
     "github",
     "brave_search",
     "competitors",
+    "review_sites",
+    "jobs_signal",
+    "seo_intent",
 ]
 
 
@@ -70,6 +81,9 @@ class ResearchPlan(BaseModel):
             "github",
             "brave_search",
             "competitors",
+            "review_sites",
+            "jobs_signal",
+            "seo_intent",
         ]
     ] = Field(
         description=(
@@ -80,7 +94,10 @@ class ResearchPlan(BaseModel):
             "- reddit: User pain points & discussions\n"
             "- github: Open source competitors/tools\n"
             "- brave_search: General market reports & news\n"
-            "- competitors: Product Hunt, AppSumo, X launches (via Brave)"
+            "- competitors: Product Hunt, AppSumo, X launches (via Brave)\n"
+            "- review_sites: G2/Capterra/Trustpilot buyer intent signals\n"
+            "- jobs_signal: Hiring demand as budget/urgency proxy\n"
+            "- seo_intent: Transactional vs informational search intent"
         )
     )
     search_keywords: list[str] = Field(
@@ -122,6 +139,9 @@ guide parallel research agents.
 - **github**: Open source code. Best for devtools and technical feasibility checks.
 - **brave_search**: General market research, articles, and industry reports.
 - **competitors**: Targeted scout for Product Hunt, AppSumo, and social launches.
+- **review_sites**: Buyer-intent clues from G2/Capterra/Trustpilot snippets.
+- **jobs_signal**: Hiring demand as a proxy for enterprise urgency and budget.
+- **seo_intent**: Commercial-intent keyword and SERP competitiveness signals.
 
 ## Guidelines
 - **Select relevant sources only**: Don't just select all. If it's a B2B SaaS, `reddit` might be weak but `competitors` is critical. If it's a deep-tech AI tool, `openalex` and `github` are essential.
@@ -135,10 +155,10 @@ Available sources: {", ".join(SOURCE_NAMES)}
 )
 
 # ---------------------------------------------------------------------------
-# Split Execution — Batched Parallel Agents to avoid API rate limits
+# Split Execution — Resilient parallel batches for speed + fault isolation
 # ---------------------------------------------------------------------------
 
-market_research = ParallelAgent(
+market_research = ResilientParallelAgent(
     name="market_research",
     sub_agents=[
         brave_search_agent,
@@ -147,7 +167,16 @@ market_research = ParallelAgent(
     ],
 )
 
-community_tech_research = ParallelAgent(
+buyer_intent_research = ResilientParallelAgent(
+    name="buyer_intent_research",
+    sub_agents=[
+        review_sites_agent,
+        jobs_signal_agent,
+        seo_intent_agent,
+    ],
+)
+
+community_tech_research = ResilientParallelAgent(
     name="community_tech_research",
     sub_agents=[
         hackernews_agent,
@@ -180,6 +209,9 @@ human-readable product validation report in well-structured markdown.
 - `github_validation`, `github_raw_report`
 - `brave_search_validation`, `brave_search_raw_report`
 - `competitors_validation`, `competitors_raw_report`
+- `review_sites_validation`, `review_sites_raw_report`
+- `jobs_signal_validation`, `jobs_signal_raw_report`
+- `seo_intent_validation`, `seo_intent_raw_report`
 
 ## Output format
 
@@ -192,6 +224,8 @@ Write your report in clean markdown with the following structure:
 
 One-paragraph executive summary explaining the verdict.
 If recommendation is PIVOT or ABANDON, explicitly say: "This is a bad idea in its current form."
+Add a one-line reason taxonomy tag: one of
+`no-demand`, `crowded-market`, `weak-differentiation`, `distribution-risk`, `execution-risk`.
 
 ## Source-by-Source Findings
 
@@ -207,6 +241,11 @@ If recommendation is PIVOT or ABANDON, explicitly say: "This is a bad idea in it
 - Macro trends and market timing
 - Search interest trajectory
 
+### Buyer Intent (Review Sites, Jobs, SEO Intent)
+- Evidence of willingness to pay and switching behavior
+- Hiring urgency / enterprise budget proxy
+- Transactional vs informational intent mix
+
 ### Technical & Academic (GitHub & OpenAlex)
 - Existing open source solutions
 - Research maturity and prior art
@@ -217,11 +256,22 @@ Is there real evidence of demand? Cite specific data points.
 ## Value Proposition
 Is the value clear and differentiated? Is the problem painful enough to pay for?
 
+## Evidence Quality
+- Assess evidence breadth, freshness, and reliability.
+- Call out weak/noisy sources explicitly.
+
+## Contradictions
+- Required bullet list of contradictions across sources.
+- Include at least one contradiction when signals conflict, otherwise write "No major contradictions found."
+
 ## Key Risks
 - Bullet list of significant risks
 
 ## Key Opportunities
 - Bullet list of promising opportunities
+
+## Why This Might Still Fail
+- 2-4 bullets on practical failure paths even if recommendation is PROCEED.
 
 ## Bottom Line
 2-3 sentence final takeaway the founder can act on immediately.
@@ -234,14 +284,29 @@ At least 2 concrete, actionable alternatives. Only include paths supported by ev
 ## Rules
 - Write in plain language — this is for a founder, not a data scientist.
 - Be honest and direct. Do not inflate scores.
-- Reference specific data points (post titles, paper names, trend numbers).
+- Reference specific data points (post titles, paper names, trend numbers, review snippets, hiring patterns).
+- Each major claim must include at least one concrete source citation in-line using this format: `[source: <source_name>, data: <brief datapoint>]`.
 - If a source was skipped or returned thin data, note it briefly.
-- Weight sources that returned richer data more heavily.
+- Use evidence weights for synthesis (default):
+  - review_sites: 0.22
+  - competitors: 0.18
+  - google_trends: 0.14
+  - github: 0.12
+  - reddit: 0.10
+  - hackernews: 0.08
+  - openalex: 0.08
+  - brave_search: 0.08
+  - jobs_signal: 0.07
+  - seo_intent: 0.07
+- Apply a contradiction penalty of -12 to the final signal score when demand is high but saturation/differentiation is poor.
 - Be conservative by default. `PROCEED` is rare and requires strong, multi-source evidence of demand, differentiation, and viable execution.
 - Recommendation thresholds:
   - `PROCEED`: only when at least 3 independent sources show strong signal, no critical red flags, and a clear wedge.
   - `PIVOT`: mixed evidence, weak differentiation, or clear demand but wrong approach/segment.
   - `ABANDON`: low demand, severe saturation with no wedge, major trust/regulatory blocker, or weak evidence quality.
+- Confidence calibration:
+  - Cap confidence at `medium` unless at least 3 strong sources agree and data is reasonably fresh.
+  - Reduce confidence for stale, thin, or conflicting evidence.
 - If evidence is weak or conflicting, never output `PROCEED`.
 - Always provide at least 2 pivot/alternative paths at the end.
 """,
@@ -293,8 +358,9 @@ def _save_report_callback(callback_context: CallbackContext) -> None:
 execution_pipeline = SequentialAgent(
     name="execution_pipeline",
     sub_agents=[
-        market_research,  # Batch 1: Brave, Trends, Competitors
-        community_tech_research,  # Batch 2: Reddit, HN, GitHub, OpenAlex
+        market_research,  # Batch 1: Market timing + competitors
+        buyer_intent_research,  # Batch 2: Buyer-intent sources
+        community_tech_research,  # Batch 3: Reddit, HN, GitHub, OpenAlex
         final_validator,  # Synthesis
     ],
     after_agent_callback=_save_report_callback,
@@ -355,5 +421,5 @@ multiple data sources.
 # ---------------------------------------------------------------------------
 
 root_agent = interactive_planner
-# Export the batched parallel agents for testing if needed
+# Export batched source runners for testing if needed
 parallel_search = market_research  # Legacy export for smoke tests
