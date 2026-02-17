@@ -1,6 +1,12 @@
-# Product Validator (Phase 1)
+# Product Validator Search
 
-Automated research agent for software/SaaS ideas using Python, `uv`, and Google ADK integration.
+Product validation agent built with Python + Google ADK.  
+It researches an idea across multiple sources and returns a critical go/pivot/abandon report.
+
+## Prerequisites
+
+- Python 3.9+
+- `uv` installed
 
 ## Setup
 
@@ -9,70 +15,61 @@ uv venv
 uv sync --extra dev
 ```
 
-To enable Tier 2 sources (Reddit via PRAW):
+## Configure API key(s)
+
+Create `.env` (or export env vars) with at least:
 
 ```bash
-uv sync --extra dev --extra tier2
+GOOGLE_API_KEY=your_key_here
+BRAVE_SEARCH_API_KEY=your_key_here
 ```
 
-## Run CLI
+Optional:
 
 ```bash
-uv run product-validator "AI tool that summarizes long email threads" "productivity" --pretty
-```
-
-CLI now starts with a plan-review step:
-- Shows which sources will be used.
-- Shows source-specific search queries.
-- Shows execution steps.
-- Prompts: `approve`, `edit`, or `cancel`.
-
-Useful flags:
-- `--plan-only` to generate plan without running research.
-- `--plan-updates "..."` to pre-seed plan changes.
-- `--auto-approve` to skip interactive approval.
-
-The output includes a final `conclusion_paragraph` that summarizes why the idea should or should not be pursued.
-It also includes `source_diagnostics` so you can see query terms, per-source hit counts, and any source-specific errors.
-The decision layer is hybrid: rule-based baseline plus Gemini-based analysis when `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) is set.
-
-## v2 signal coverage
-
-Buyer-intent expansion adds:
-- `review_sites` (G2/Capterra/Trustpilot snippets)
-- `jobs_signal` (hiring urgency proxy)
-- `seo_intent` (transactional vs informational demand proxy)
-
-Final synthesis now includes:
-- Evidence quality scoring
-- Contradiction detection and penalty
-- Confidence calibration (caps high confidence on weak source agreement)
-
-## ADK App
-
-```python
-from product_validator.adk_app import build_app
-
-app = build_app(model="gemini-3.0-flash")
-```
-
-## Test ideas
-
-1. AI tool that summarizes long email threads
-2. No-code platform for building Discord bots
-3. Browser extension that blocks distracting sites during focus time
-
-## Optional environment variables
-
-```bash
+GEMINI_API_KEY=your_key_here
 GITHUB_TOKEN=ghp_xxx
 REDDIT_CLIENT_ID=xxx
 REDDIT_CLIENT_SECRET=xxx
 REDDIT_USER_AGENT=product-validator/0.1
-PRODUCT_HUNT_TOKEN=xxx
-CRUNCHBASE_API_KEY=xxx
-GOOGLE_API_KEY=xxx
-PV_ENABLE_LLM_ANALYSIS=true
-PV_LLM_ANALYSIS_MODEL=gemini-3.0-flash
-BRAVE_SEARCH_API_KEY=xxx
 ```
+
+## Run Web UI
+
+Recommended shortcut:
+
+```bash
+uv run web
+```
+
+Alternative alias:
+
+```bash
+uv run start
+```
+
+Equivalent direct command:
+
+```bash
+uv run adk web .
+```
+
+Custom host/port:
+
+```bash
+uv run web --host 0.0.0.0 --port 8000
+```
+
+Then open the URL shown in terminal (usually `http://127.0.0.1:8000`).
+
+## Run tests
+
+```bash
+uv run pytest -q
+```
+
+## Project structure
+
+- `product_validator_search/agent.py`: root orchestration and report synthesis
+- `product_validator_search/sources/`: source-specific researcher/validator agents
+- `reports/`: generated reports (gitignored)

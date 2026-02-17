@@ -17,6 +17,10 @@ dev = [
   "pytest-asyncio>=0.23.0"
 ]
 
+[project.scripts]
+web = "product_validator_search.cli:web"
+start = "product_validator_search.cli:web"
+
 [tool.hatch.build.targets.wheel]
 packages = ["product_validator_search"]
 
