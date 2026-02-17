@@ -1,7 +1,7 @@
 [project]
-name = "product-validator"
+name = "product-validator-search"
 version = "0.1.0"
-description = "Phase 1 Product Validator built with Python and Google ADK integration"
+description = "Product Validator Search built with Python and Google ADK integration"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -9,7 +9,6 @@ dependencies = [
   "pytrends>=4.9.2",
   "google-adk",
   "pydantic>=2.7.0",
-  "praw>=7.7.1"
 ]
 
 [project.optional-dependencies]
@@ -18,11 +17,13 @@ dev = [
   "pytest-asyncio>=0.23.0"
 ]
 
-[project.scripts]
-product-validator = "product_validator.cli:main"
+[tool.hatch.build.targets.wheel]
+packages = ["product_validator_search"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
 
 [build-system]
 requires = ["hatchling>=1.25.0"]

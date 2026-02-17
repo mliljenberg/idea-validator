@@ -112,6 +112,12 @@ Your job is to evaluate the evidence and produce a structured assessment:
 8. **Reasoning** — A concise explanation of your assessment.
 
 Be rigorous. Do not inflate scores. If the data is thin or ambiguous, say so.
+
+Recommendation rules:
+- Default to skeptical. Curiosity in comments is not product demand.
+- Use `proceed` only if multiple threads show repeated pain, clear urgency, and dissatisfaction with current options.
+- Use `pivot` for partial demand signals with weak fit, wrong audience, or unclear differentiation.
+- Use `abandon` when sentiment is mostly dismissive, problem urgency is low, or alternatives are "good enough."
 """,
     output_schema=HackerNewsValidation,
     output_key="hackernews_validation",

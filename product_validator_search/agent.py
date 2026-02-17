@@ -6,10 +6,15 @@ Architecture:
   │     └── plan_generator (LlmAgent)
   │           output_schema: ResearchPlan → state "research_plan"
   └── sub_agent: execution_pipeline (SequentialAgent)
-        ├── parallel_search (ParallelAgent)
-        │     ├── hackernews_agent   → state "hackernews_validation"
-        │     ├── openalex_agent     → state "openalex_validation"
-        │     └── google_trends_agent → state "google_trends_validation"
+        ├── market_research (ParallelAgent)
+        │     ├── brave_search_agent  → state "brave_search_validation"
+        │     ├── google_trends_agent → state "google_trends_validation"
+        │     └── competitors_agent   → state "competitors_validation"
+        ├── community_tech_research (ParallelAgent)
+        │     ├── hackernews_agent    → state "hackernews_validation"
+        │     ├── reddit_agent        → state "reddit_validation"
+        │     ├── github_agent        → state "github_validation"
+        │     └── openalex_agent      → state "openalex_validation"
         └── final_validator (LlmAgent)
               free-form markdown → state "final_validation"
               (also saved to reports/ as .md file via callback)
@@ -30,12 +35,24 @@ from .config import config
 from .sources.hackernews import hackernews_agent
 from .sources.openalex import openalex_agent
 from .sources.google_trends import google_trends_agent
+from .sources.reddit import reddit_agent
+from .sources.github import github_agent
+from .sources.brave_search import brave_search_agent
+from .sources.competitors import competitors_agent
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas for structured agent outputs
 # ---------------------------------------------------------------------------
 
-SOURCE_NAMES = ["hackernews", "openalex", "google_trends"]
+SOURCE_NAMES = [
+    "hackernews",
+    "openalex",
+    "google_trends",
+    "reddit",
+    "github",
+    "brave_search",
+    "competitors",
+]
 
 
 class ResearchPlan(BaseModel):
@@ -44,12 +61,26 @@ class ResearchPlan(BaseModel):
     product_idea: str = Field(
         description="A clear, concise summary of the product idea being validated."
     )
-    selected_sources: list[Literal["hackernews", "openalex", "google_trends"]] = Field(
+    selected_sources: list[
+        Literal[
+            "hackernews",
+            "openalex",
+            "google_trends",
+            "reddit",
+            "github",
+            "brave_search",
+            "competitors",
+        ]
+    ] = Field(
         description=(
-            "Which data sources to query. Choose based on relevance: "
-            "hackernews for developer/startup sentiment and pain points, "
-            "openalex for academic research maturity and prior art, "
-            "google_trends for market demand and timing signals."
+            "Which data sources to query. Select based on relevance:\n"
+            "- hackernews: Tech/startup sentiment\n"
+            "- openalex: Academic/deep-tech research\n"
+            "- google_trends: Market demand timing\n"
+            "- reddit: User pain points & discussions\n"
+            "- github: Open source competitors/tools\n"
+            "- brave_search: General market reports & news\n"
+            "- competitors: Product Hunt, AppSumo, X launches (via Brave)"
         )
     )
     search_keywords: list[str] = Field(
@@ -80,25 +111,22 @@ plan_generator = LlmAgent(
 You are a product-validation planning specialist.
 
 Given a product idea from the user, produce a structured ResearchPlan that will
-guide three parallel research agents:
+guide parallel research agents.
 
-- **hackernews**: Developer and startup community sentiment. Best for: pain
-  points, feature requests, competitor discussions, community enthusiasm or
-  skepticism. Select when the idea targets developers, startups, or tech users.
-- **openalex**: Academic and scientific literature. Best for: research maturity,
-  prior art, technology readiness, academic competitors. Select when the idea
-  involves novel technology, scientific methods, or deep-tech.
-- **google_trends**: Search interest and demand signals. Best for: market
-  timing, demand trajectory, keyword popularity, emerging niches. Select when
-  you want to gauge mainstream interest or compare against competitors.
+## Available Sources
 
-Guidelines:
-- Select ALL sources that are relevant. For most ideas, all three provide
-  complementary signals. Only exclude a source if it truly adds no value.
-- Generate 3-6 diverse search_keywords covering: the product concept, the
-  problem it solves, competitor names, and the broader category.
-- Write a focused research_focus directive so the agents know what matters.
-- Include sources_rationale explaining your source choices.
+- **hackernews**: Developer sentiment, startup critiques. Best for tech products.
+- **openalex**: Academic papers. Best for deep-tech, AI, health, science.
+- **google_trends**: Search volume. Best for consumer demand and timing.
+- **reddit**: Unfiltered user feedback. Best for B2C and community-driven tools.
+- **github**: Open source code. Best for devtools and technical feasibility checks.
+- **brave_search**: General market research, articles, and industry reports.
+- **competitors**: Targeted scout for Product Hunt, AppSumo, and social launches.
+
+## Guidelines
+- **Select relevant sources only**: Don't just select all. If it's a B2B SaaS, `reddit` might be weak but `competitors` is critical. If it's a deep-tech AI tool, `openalex` and `github` are essential.
+- **Keywords**: Generate 3-6 diverse search phrases.
+- **Focus**: Write a clear `research_focus` to guide the agents.
 
 Available sources: {", ".join(SOURCE_NAMES)}
 """,
@@ -107,12 +135,26 @@ Available sources: {", ".join(SOURCE_NAMES)}
 )
 
 # ---------------------------------------------------------------------------
-# parallel_search — runs all source agents concurrently
+# Split Execution — Batched Parallel Agents to avoid API rate limits
 # ---------------------------------------------------------------------------
 
-parallel_search = ParallelAgent(
-    name="parallel_search",
-    sub_agents=[hackernews_agent, openalex_agent, google_trends_agent],
+market_research = ParallelAgent(
+    name="market_research",
+    sub_agents=[
+        brave_search_agent,
+        google_trends_agent,
+        competitors_agent,
+    ],
+)
+
+community_tech_research = ParallelAgent(
+    name="community_tech_research",
+    sub_agents=[
+        hackernews_agent,
+        reddit_agent,
+        github_agent,
+        openalex_agent,
+    ],
 )
 
 # ---------------------------------------------------------------------------
@@ -130,13 +172,14 @@ human-readable product validation report in well-structured markdown.
 
 ## Inputs available in session state
 
-- `research_plan` — the original plan (product_idea, selected_sources, etc.)
-- `hackernews_validation` — structured findings from Hacker News (may be null if source was not selected)
-- `hackernews_raw_report` — raw HN research data
-- `openalex_validation` — structured findings from academic literature (may be null)
-- `openalex_raw_report` — raw OpenAlex research data
-- `google_trends_validation` — structured findings from Google Trends (may be null)
-- `google_trends_raw_report` — raw Google Trends research data
+- `research_plan` — the original plan
+- `hackernews_validation`, `hackernews_raw_report`
+- `openalex_validation`, `openalex_raw_report`
+- `google_trends_validation`, `google_trends_raw_report`
+- `reddit_validation`, `reddit_raw_report`
+- `github_validation`, `github_raw_report`
+- `brave_search_validation`, `brave_search_raw_report`
+- `competitors_validation`, `competitors_raw_report`
 
 ## Output format
 
@@ -148,35 +191,31 @@ Write your report in clean markdown with the following structure:
 **Recommendation: [PROCEED / PIVOT / ABANDON]** | Signal Score: **[X]/100** | Confidence: **[low/medium/high]**
 
 One-paragraph executive summary explaining the verdict.
+If recommendation is PIVOT or ABANDON, explicitly say: "This is a bad idea in its current form."
 
 ## Source-by-Source Findings
 
-### Hacker News
-- What was found (or "source was not selected / no relevant data")
-- Key pain points, competitor mentions, community sentiment
-- Source signal score and assessment
+### Competitor Landscape (Product Hunt, AppSumo, X)
+- Key competitors found
+- Saturation level and differentiation gaps
 
-### Academic Research (OpenAlex)
-- What was found
-- Research maturity, technology readiness, academic competitors
-- Source signal score and assessment
+### User Sentiment (Reddit & Hacker News)
+- Real pain points mentioned
+- Community enthusiasm vs skepticism
 
-### Google Trends
-- What was found
-- Trend direction, demand trajectory, related queries
-- Source signal score and assessment
+### Market Demand (Brave Search & Google Trends)
+- Macro trends and market timing
+- Search interest trajectory
+
+### Technical & Academic (GitHub & OpenAlex)
+- Existing open source solutions
+- Research maturity and prior art
 
 ## Traction & Demand
-Is there real evidence of demand? Cite specific data points from the sources.
-
-## Competitive Landscape
-Who are the existing players? How crowded is the space? Where are the gaps?
+Is there real evidence of demand? Cite specific data points.
 
 ## Value Proposition
 Is the value clear and differentiated? Is the problem painful enough to pay for?
-
-## Pivot Suggestions
-At least 2 concrete, actionable alternative directions. Be specific.
 
 ## Key Risks
 - Bullet list of significant risks
@@ -187,21 +226,24 @@ At least 2 concrete, actionable alternative directions. Be specific.
 ## Bottom Line
 2-3 sentence final takeaway the founder can act on immediately.
 
+## Pivot / Alternative Paths
+At least 2 concrete, actionable alternatives. Only include paths supported by evidence.
+
 ---
 
 ## Rules
 - Write in plain language — this is for a founder, not a data scientist.
-- Be honest and direct. Do not inflate scores or sugarcoat weak signals.
+- Be honest and direct. Do not inflate scores.
 - Reference specific data points (post titles, paper names, trend numbers).
-- If a source was skipped or returned thin data, say so and note the impact on confidence.
+- If a source was skipped or returned thin data, note it briefly.
 - Weight sources that returned richer data more heavily.
-- If sources contradict each other, explain the tension and how you resolved it.
-- Always provide at least 2 pivot suggestions, even for "proceed" recommendations.
-- Use the signal score scale consistently:
-  0-30: Weak — likely abandon
-  31-55: Mixed — consider pivoting
-  56-75: Moderate — proceed with caution
-  76-100: Strong — proceed confidently
+- Be conservative by default. `PROCEED` is rare and requires strong, multi-source evidence of demand, differentiation, and viable execution.
+- Recommendation thresholds:
+  - `PROCEED`: only when at least 3 independent sources show strong signal, no critical red flags, and a clear wedge.
+  - `PIVOT`: mixed evidence, weak differentiation, or clear demand but wrong approach/segment.
+  - `ABANDON`: low demand, severe saturation with no wedge, major trust/regulatory blocker, or weak evidence quality.
+- If evidence is weak or conflicting, never output `PROCEED`.
+- Always provide at least 2 pivot/alternative paths at the end.
 """,
     output_key="final_validation",
 )
@@ -234,19 +276,27 @@ def _save_report_callback(callback_context: CallbackContext) -> None:
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = os.path.join(_REPORTS_DIR, f"{timestamp}_{slug}.md")
 
-    with open(filename, "w") as f:
-        f.write(report)
+    try:
+        with open(filename, "w") as f:
+            f.write(report)
+    except Exception:
+        # Silently fail on file write error to avoid crashing the agent response
+        pass
 
     return None
 
 
 # ---------------------------------------------------------------------------
-# execution_pipeline — parallel search → final validation (+ save to file)
+# execution_pipeline — Batched Parallel Search → Final Validation (+ save to file)
 # ---------------------------------------------------------------------------
 
 execution_pipeline = SequentialAgent(
     name="execution_pipeline",
-    sub_agents=[parallel_search, final_validator],
+    sub_agents=[
+        market_research,  # Batch 1: Brave, Trends, Competitors
+        community_tech_research,  # Batch 2: Reddit, HN, GitHub, OpenAlex
+        final_validator,  # Synthesis
+    ],
     after_agent_callback=_save_report_callback,
 )
 
@@ -305,3 +355,5 @@ multiple data sources.
 # ---------------------------------------------------------------------------
 
 root_agent = interactive_planner
+# Export the batched parallel agents for testing if needed
+parallel_search = market_research  # Legacy export for smoke tests

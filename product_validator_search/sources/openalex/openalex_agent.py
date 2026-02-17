@@ -132,6 +132,12 @@ Evaluate the evidence and produce a structured assessment:
 
 Be rigorous. A heavily-researched area might mean opportunity (validated
 problem) or risk (many competing solutions). Distinguish carefully.
+
+Recommendation rules:
+- Default to skeptical. Academic interest does not guarantee commercial demand.
+- Use `proceed` only when research momentum is active, technology readiness is practical, and there is room to differentiate.
+- Use `pivot` when the science is promising but commercialization path or target use case is weak.
+- Use `abandon` when the field is saturated, impractical, or unlikely to convert into a defensible product.
 """,
     output_schema=OpenAlexValidation,
     output_key="openalex_validation",

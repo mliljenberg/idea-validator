@@ -130,6 +130,12 @@ Evaluate the evidence and produce a structured assessment:
 Be careful: Google Trends measures search interest, not market size. A rising
 trend in a niche keyword may still be a small market. A declining trend might
 mean the problem is solved, not that demand disappeared. Interpret carefully.
+
+Recommendation rules:
+- Default to skeptical because trend data is noisy.
+- Use `proceed` only when core keywords show durable growth and related queries indicate expanding demand.
+- Use `pivot` for mixed signals (flat/volatile demand, or growth in adjacent keywords but not the core concept).
+- Use `abandon` when demand is persistently weak/declining and no credible adjacent opportunity appears.
 """,
     output_schema=GoogleTrendsValidation,
     output_key="google_trends_validation",
