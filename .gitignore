@@ -220,3 +220,14 @@ reports/
 
 # ADK local session state
 product_validator_search/.adk/session.db
+
+# Desktop app artifacts
+desktop/node_modules/
+desktop/dist/*
+!desktop/dist/
+!desktop/dist/index.html
+desktop/.vite/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+!desktop/src/lib/
+!desktop/src/lib/**

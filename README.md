@@ -1,75 +1,110 @@
 # Product Validator Search
 
-Product validation agent built with Python + Google ADK.  
-It researches an idea across multiple sources and returns a critical go/pivot/abandon report.
+Product validation system built with Python + Google ADK, plus a Tauri desktop client.
 
 ## Prerequisites
 
 - Python 3.9+
-- `uv` installed
+- `uv`
+- Rust toolchain (for Tauri desktop)
+- `bun` (for desktop frontend)
 
-## Setup
+## Python backend setup
 
 ```bash
 uv venv
 uv sync --extra dev
 ```
 
-## Configure API key(s)
+Copy env template:
 
-Create `.env` (or export env vars) with at least:
+```bash
+cp .env.example .env
+```
+
+Required keys:
 
 ```bash
 GOOGLE_API_KEY=your_key_here
 BRAVE_SEARCH_API_KEY=your_key_here
 ```
 
-Optional:
-
-```bash
-GEMINI_API_KEY=your_key_here
-GITHUB_TOKEN=ghp_xxx
-REDDIT_CLIENT_ID=xxx
-REDDIT_CLIENT_SECRET=xxx
-REDDIT_USER_AGENT=product-validator/0.1
-```
-
-## Run Web UI
-
-Recommended shortcut:
+## Run ADK web directly
 
 ```bash
 uv run web
 ```
 
-Alternative alias:
+or:
 
 ```bash
 uv run start
 ```
 
-Equivalent direct command:
+Both commands forward to:
 
 ```bash
 uv run adk web .
 ```
 
-Custom host/port:
+## Desktop app (Tauri + React)
+
+The desktop app lives in `desktop/` and manages the local ADK backend automatically.
+
+Install desktop dependencies:
 
 ```bash
-uv run web --host 0.0.0.0 --port 8000
+cd desktop
+bun install
 ```
 
-Then open the URL shown in terminal (usually `http://127.0.0.1:8000`).
+Run desktop in development:
 
-## Run tests
+```bash
+bun run tauri:dev
+```
+
+Build desktop app:
+
+```bash
+bun run tauri:build
+```
+
+## Tests
+
+Python tests:
 
 ```bash
 uv run pytest -q
 ```
 
+Desktop frontend unit tests:
+
+```bash
+cd desktop
+bun test
+```
+
+Rust unit tests:
+
+```bash
+cd desktop/src-tauri
+cargo test
+```
+
+## Troubleshooting
+
+- `uv` missing:
+  Install uv and ensure it is on your `PATH`.
+- Backend won't start in desktop:
+  Confirm keys exist in app settings or `.env`, then press **Start / Refresh**.
+- Port conflict on 8765:
+  Desktop automatically retries higher ports.
+- Missing keys:
+  Open desktop key settings panel and save keys to OS keychain.
+
 ## Project structure
 
-- `product_validator_search/agent.py`: root orchestration and report synthesis
-- `product_validator_search/sources/`: source-specific researcher/validator agents
-- `reports/`: generated reports (gitignored)
+- `product_validator_search/`: Python agent orchestration and sources
+- `desktop/`: Tauri desktop app with streaming UI
+- `reports/`: generated markdown reports (gitignored)
