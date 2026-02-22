@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPhase {
+    IdeaInput,
+    AwaitingApproval,
+    Running,
+    Completed,
+    Failed,
+}
+
+impl SessionPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IdeaInput => "idea_input",
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    Idea,
+    EditPlan,
+    Approve,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendStartConfig {
@@ -25,9 +55,13 @@ pub struct BackendStatus {
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub id: String,
+    pub title: String,
     pub app_name: String,
     pub user_id: String,
-    pub last_update_time: Option<f64>,
+    pub phase: SessionPhase,
+    pub read_only: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,12 +81,67 @@ pub struct SessionListInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionDeleteInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessagesGetInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessageAppendInput {
+    pub session_id: String,
+    pub role: String,
+    pub text: String,
+    pub status: String,
+    pub created_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessage {
+    pub id: String,
+    pub session_id: String,
+    pub role: String,
+    pub text: String,
+    pub status: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPhaseGetInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPhaseState {
+    pub phase: SessionPhase,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPhaseSetInput {
+    pub session_id: String,
+    pub phase: SessionPhase,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamRunInput {
     pub request_id: String,
     pub app_name: String,
     pub user_id: String,
     pub session_id: String,
     pub text: String,
+    pub run_mode: RunMode,
     pub invocation_id: Option<String>,
 }
 

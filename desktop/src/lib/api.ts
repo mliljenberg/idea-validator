@@ -4,6 +4,13 @@ import type {
   BackendStartConfig,
   BackendStatus,
   KeyPresence,
+  SessionDeleteInput,
+  SessionMessage,
+  SessionMessageAppendInput,
+  SessionMessagesGetInput,
+  SessionPhaseGetInput,
+  SessionPhaseSetInput,
+  SessionPhaseState,
   SessionCreateInput,
   SessionListInput,
   SessionMeta,
@@ -24,6 +31,21 @@ export const sessionCreate = (input: SessionCreateInput) =>
 
 export const sessionList = (input: SessionListInput) =>
   invoke<SessionMeta[]>("session_list", { input });
+
+export const sessionDelete = (input: SessionDeleteInput) =>
+  invoke<Ack>("session_delete", { input });
+
+export const sessionMessagesGet = (input: SessionMessagesGetInput) =>
+  invoke<SessionMessage[]>("session_messages_get", { input });
+
+export const sessionMessagesAppend = (input: SessionMessageAppendInput) =>
+  invoke<SessionMessage>("session_messages_append", { input });
+
+export const sessionPhaseGet = (input: SessionPhaseGetInput) =>
+  invoke<SessionPhaseState>("session_phase_get", { input });
+
+export const sessionPhaseSet = (input: SessionPhaseSetInput) =>
+  invoke<SessionPhaseState>("session_phase_set", { input });
 
 export const streamRun = (input: StreamRunInput) =>
   invoke<Ack>("stream_run", { input });

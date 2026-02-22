@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{run_fallback_url, run_sse_url};
+use crate::session_store::ReplayMessage;
 use crate::types::StreamRunInput;
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +94,7 @@ struct ToolSignal {
 struct StreamState {
     last_model_text: String,
     saw_model_text: bool,
+    saw_error: bool,
     tools_started: usize,
     tools_completed: usize,
     last_progress_percent: Option<u8>,
@@ -106,12 +108,21 @@ struct SseFailure {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamOutcome {
+    Completed,
+    Failed,
+}
+
 pub async fn run_stream_task(
     app: AppHandle,
     base_url: String,
     input: StreamRunInput,
+    replay_messages: Vec<ReplayMessage>,
     cancel: CancellationToken,
-) -> Result<(), String> {
+) -> Result<StreamOutcome, String> {
+    ensure_adk_session(&base_url, &input).await?;
+
     emit(
         &app,
         &input.request_id,
@@ -127,14 +138,31 @@ pub async fn run_stream_task(
             kind: "stream_progress",
             request_id: input.request_id.clone(),
             percent: 5,
-            stage: "Starting run".to_string(),
+            stage: "Rehydrating context".to_string(),
             tools_completed: 0,
             tools_total: 0,
         },
     )?;
 
+    if !replay_messages.is_empty() {
+        if let Err(err) = replay_history(&base_url, &input, &replay_messages, &cancel).await {
+            emit(
+                &app,
+                &input.request_id,
+                StreamTool {
+                    kind: "stream_tool",
+                    request_id: input.request_id.clone(),
+                    phase: "info",
+                    name: "context_replay".to_string(),
+                    query: None,
+                    detail: Some(format!("Replay degraded: {}", truncate(&err, 240))),
+                },
+            )?;
+        }
+    }
+
     match run_sse_stream(&app, &base_url, &input, cancel).await {
-        Ok(()) => Ok(()),
+        Ok(outcome) => Ok(outcome),
         Err(failure) => {
             // Fall back to /run only when /run_sse is clearly unsupported by this backend.
             let fallback_allowed = matches!(failure.status, Some(404 | 405 | 501));
@@ -160,7 +188,7 @@ pub async fn run_stream_task(
                         usage: None,
                     },
                 )?;
-                Ok(())
+                Ok(StreamOutcome::Failed)
             }
         }
     }
@@ -171,7 +199,7 @@ async fn run_sse_stream(
     base_url: &str,
     input: &StreamRunInput,
     cancel: CancellationToken,
-) -> Result<(), SseFailure> {
+) -> Result<StreamOutcome, SseFailure> {
     let response = send_run_sse_request(base_url, input).await?;
     let status = response.status();
     if !status.is_success() {
@@ -192,19 +220,25 @@ async fn run_sse_stream(
 
     let mut usage = None;
     let mut state = StreamState::default();
-    emit_progress_if_changed(app, &input.request_id, &mut state, false).map_err(|e| SseFailure {
-        status: None,
-        message: e,
+    emit_progress_if_changed(app, &input.request_id, &mut state, false).map_err(|e| {
+        SseFailure {
+            status: None,
+            message: e,
+        }
     })?;
 
     let mut stream = response.bytes_stream();
     let mut line_buffer = String::new();
     let mut data_lines: Vec<String> = Vec::new();
     let mut done = false;
+    let mut cancelled = false;
 
     while !done {
         let next = tokio::select! {
-            _ = cancel.cancelled() => break,
+            _ = cancel.cancelled() => {
+                cancelled = true;
+                break;
+            }
             chunk = stream.next() => chunk,
         };
 
@@ -255,12 +289,35 @@ async fn run_sse_stream(
                 data_lines.push(data.trim_start().to_string());
             }
         }
-        done = consume_sse_event(app, &input.request_id, &mut state, &mut usage, &mut data_lines)
-            .map_err(|e| SseFailure {
-                status: None,
-                message: e,
-            })?;
+        done = consume_sse_event(
+            app,
+            &input.request_id,
+            &mut state,
+            &mut usage,
+            &mut data_lines,
+        )
+        .map_err(|e| SseFailure {
+            status: None,
+            message: e,
+        })?;
         let _ = done;
+    }
+
+    if cancelled {
+        emit(
+            app,
+            &input.request_id,
+            StreamError {
+                kind: "stream_error",
+                request_id: input.request_id.clone(),
+                message: "Run cancelled.".to_string(),
+                retryable: false,
+            },
+        )
+        .map_err(|e| SseFailure {
+            status: None,
+            message: e,
+        })?;
     }
 
     emit(
@@ -281,7 +338,11 @@ async fn run_sse_stream(
         message: e,
     })?;
 
-    Ok(())
+    if cancelled || state.saw_error {
+        Ok(StreamOutcome::Failed)
+    } else {
+        Ok(StreamOutcome::Completed)
+    }
 }
 
 fn consume_sse_event(
@@ -323,7 +384,7 @@ async fn run_non_streaming_fallback(
     base_url: &str,
     input: &StreamRunInput,
     sse_status: Option<u16>,
-) -> Result<(), String> {
+) -> Result<StreamOutcome, String> {
     let (status, response_text) = send_run_request(base_url, input).await?;
 
     if !status.is_success() {
@@ -358,13 +419,21 @@ async fn run_non_streaming_fallback(
                 usage: None,
             },
         )?;
-        return Ok(());
+        return Ok(StreamOutcome::Failed);
     }
 
-    let payload = serde_json::from_str::<Value>(&response_text)
-        .map_err(|e| format!("Failed to parse fallback /run response: {e}. Body: {}", truncate(&response_text, 500)))?;
-    let events = extract_run_events(&payload)
-        .ok_or_else(|| format!("Unexpected /run response shape: {}", summarize_json_shape(&payload)))?;
+    let payload = serde_json::from_str::<Value>(&response_text).map_err(|e| {
+        format!(
+            "Failed to parse fallback /run response: {e}. Body: {}",
+            truncate(&response_text, 500)
+        )
+    })?;
+    let events = extract_run_events(&payload).ok_or_else(|| {
+        format!(
+            "Unexpected /run response shape: {}",
+            summarize_json_shape(&payload)
+        )
+    })?;
 
     let mut usage = None;
     let mut state = StreamState::default();
@@ -384,7 +453,11 @@ async fn run_non_streaming_fallback(
     )?;
     emit_progress_if_changed(&app, &input.request_id, &mut state, true)?;
 
-    Ok(())
+    if state.saw_error {
+        Ok(StreamOutcome::Failed)
+    } else {
+        Ok(StreamOutcome::Completed)
+    }
 }
 
 async fn send_run_request(
@@ -402,7 +475,7 @@ async fn send_run_request(
         }
     });
 
-    let response = http_client()
+    let response = http_client_long()
         .post(run_fallback_url(base_url))
         .json(&fallback_body)
         .send()
@@ -416,6 +489,105 @@ async fn send_run_request(
         .map_err(|e| format!("Failed to read /run response body: {e}"))?;
 
     Ok((status, response_text))
+}
+
+async fn ensure_adk_session(base_url: &str, input: &StreamRunInput) -> Result<(), String> {
+    let url = format!(
+        "{}/apps/{}/users/{}/sessions",
+        base_url, input.app_name, input.user_id
+    );
+    let body = json!({ "sessionId": input.session_id });
+
+    let response = http_client()
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create ADK execution session: {e}"))?;
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
+    Err(format!(
+        "Failed to create ADK execution session (HTTP {status}){}",
+        if body_text.trim().is_empty() {
+            "".to_string()
+        } else {
+            format!(" | backend: {}", truncate(body_text.trim(), 500))
+        }
+    ))
+}
+
+async fn replay_history(
+    base_url: &str,
+    input: &StreamRunInput,
+    replay_messages: &[ReplayMessage],
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    for (index, message) in replay_messages.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("Replay cancelled.".to_string());
+        }
+
+        let replay_text = replay_text(message);
+        let body = json!({
+            "app_name": input.app_name,
+            "user_id": input.user_id,
+            "session_id": input.session_id,
+            "streaming": false,
+            "new_message": {
+                "role": "user",
+                "parts": [{ "text": replay_text }]
+            }
+        });
+
+        let response = http_client_long()
+            .post(run_fallback_url(base_url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed replay request {} of {}: {e}",
+                    index + 1,
+                    replay_messages.len()
+                )
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "Replay request {} of {} returned {}{}",
+                index + 1,
+                replay_messages.len(),
+                status,
+                if body_text.trim().is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" | backend: {}", truncate(body_text.trim(), 500))
+                }
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn replay_text(message: &ReplayMessage) -> String {
+    let role = message.role.trim().to_ascii_lowercase();
+    if role == "user" {
+        return message.text.clone();
+    }
+
+    if role == "assistant" || role == "model" {
+        return format!("Previous assistant response:\n{}", message.text);
+    }
+
+    format!("Previous context:\n{}", message.text)
 }
 
 async fn send_run_sse_request(
@@ -443,6 +615,28 @@ async fn send_run_sse_request(
             status: None,
             message: format!("error sending request to /run_sse: {e}"),
         })
+}
+
+fn http_client_long() -> Client {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .expect("reqwest client should build")
+}
+
+fn http_client() -> Client {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .expect("reqwest client should build")
+}
+
+fn http_client_stream() -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(1800))
+        .build()
+        .expect("reqwest client should build")
 }
 
 fn process_event(
@@ -478,6 +672,7 @@ fn process_event(
     )?;
 
     if let Some(message) = extract_error_message(event) {
+        state.saw_error = true;
         emit(
             app,
             request_id,
@@ -721,8 +916,10 @@ fn collect_queries(value: &Value, out: &mut Vec<String>, depth: usize) {
         Value::Object(map) => {
             for (k, v) in map {
                 let lower = k.to_lowercase();
-                let looks_like_query =
-                    lower == "q" || lower == "query" || lower == "queries" || lower.contains("query");
+                let looks_like_query = lower == "q"
+                    || lower == "query"
+                    || lower == "queries"
+                    || lower.contains("query");
                 if looks_like_query {
                     match v {
                         Value::String(s) if !s.trim().is_empty() => out.push(s.trim().to_string()),
@@ -811,7 +1008,10 @@ fn progress_snapshot(state: &StreamState, done: bool) -> (u8, String) {
         if completed < total {
             let fraction = completed as f32 / total as f32;
             let percent = (25.0 + fraction * 55.0).round() as u8;
-            return (percent.min(88), format!("Running tools ({completed}/{total})"));
+            return (
+                percent.min(88),
+                format!("Running tools ({completed}/{total})"),
+            );
         }
         if state.saw_model_text {
             return (92, "Synthesizing report".to_string());
@@ -858,21 +1058,6 @@ fn emit_progress_if_changed(
             tools_total: state.tools_started,
         },
     )
-}
-
-fn http_client() -> Client {
-    Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .expect("reqwest client should build")
-}
-
-fn http_client_stream() -> Client {
-    Client::builder()
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(1800))
-        .build()
-        .expect("reqwest client should build")
 }
 
 fn emit<T: Serialize + Clone>(app: &AppHandle, request_id: &str, payload: T) -> Result<(), String> {

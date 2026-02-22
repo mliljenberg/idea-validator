@@ -3,6 +3,7 @@
 mod backend;
 mod commands;
 mod keyring_store;
+mod session_store;
 mod stream;
 mod types;
 
@@ -19,6 +20,11 @@ fn main() {
             commands::backend_list_apps,
             commands::session_create,
             commands::session_list,
+            commands::session_delete,
+            commands::session_messages_get,
+            commands::session_messages_append,
+            commands::session_phase_get,
+            commands::session_phase_set,
             commands::stream_run,
             commands::stream_cancel,
             commands::keys_set,

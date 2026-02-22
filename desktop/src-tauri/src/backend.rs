@@ -5,14 +5,12 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use reqwest::Client;
-use serde::Deserialize;
-use serde_json::json;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
 
 use crate::keyring_store::KeyEnv;
-use crate::types::{BackendStartConfig, BackendStatus, SessionMeta};
+use crate::types::{BackendStartConfig, BackendStatus};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
@@ -258,70 +256,6 @@ impl BackendManager {
             .await
             .map_err(|e| format!("Failed to parse /list-apps response: {e}"))
     }
-
-    pub async fn create_session(
-        &self,
-        app_name: &str,
-        user_id: &str,
-        session_id: Option<&str>,
-    ) -> Result<SessionMeta, String> {
-        let url = format!(
-            "{}/apps/{}/users/{}/sessions",
-            self.base_url(),
-            app_name,
-            user_id
-        );
-
-        let body = if let Some(session_id) = session_id {
-            json!({ "sessionId": session_id })
-        } else {
-            json!({})
-        };
-
-        let response = client()
-            .post(url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to create session: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(format!("Session create failed with HTTP {}", response.status()));
-        }
-
-        let session: SessionResponse = response
-            .json()
-            .await
-            .map_err(|e| format!("Invalid session response: {e}"))?;
-
-        Ok(session.into())
-    }
-
-    pub async fn list_sessions(&self, app_name: &str, user_id: &str) -> Result<Vec<SessionMeta>, String> {
-        let url = format!(
-            "{}/apps/{}/users/{}/sessions",
-            self.base_url(),
-            app_name,
-            user_id
-        );
-
-        let response = client()
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to list sessions: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(format!("Session list failed with HTTP {}", response.status()));
-        }
-
-        let sessions: Vec<SessionResponse> = response
-            .json()
-            .await
-            .map_err(|e| format!("Invalid session list response: {e}"))?;
-
-        Ok(sessions.into_iter().map(Into::into).collect())
-    }
 }
 
 fn client() -> Client {
@@ -443,26 +377,6 @@ async fn health_check(base_url: &str) -> bool {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionResponse {
-    id: String,
-    app_name: String,
-    user_id: String,
-    last_update_time: Option<f64>,
-}
-
-impl From<SessionResponse> for SessionMeta {
-    fn from(value: SessionResponse) -> Self {
-        Self {
-            id: value.id,
-            app_name: value.app_name,
-            user_id: value.user_id,
-            last_update_time: value.last_update_time,
-        }
-    }
-}
-
 pub fn choose_default_app(apps: &[String]) -> Option<String> {
     if apps.is_empty() {
         return None;
@@ -515,13 +429,23 @@ mod tests {
 
     #[test]
     fn picks_product_validator_search_if_present() {
-        let apps = vec!["reports".to_string(), "product_validator_search".to_string()];
-        assert_eq!(choose_default_app(&apps).as_deref(), Some("product_validator_search"));
+        let apps = vec![
+            "reports".to_string(),
+            "product_validator_search".to_string(),
+        ];
+        assert_eq!(
+            choose_default_app(&apps).as_deref(),
+            Some("product_validator_search")
+        );
     }
 
     #[test]
     fn falls_back_to_non_auxiliary_app() {
-        let apps = vec!["reports".to_string(), "tests".to_string(), "demo_agent".to_string()];
+        let apps = vec![
+            "reports".to_string(),
+            "tests".to_string(),
+            "demo_agent".to_string(),
+        ];
         assert_eq!(choose_default_app(&apps).as_deref(), Some("demo_agent"));
     }
 

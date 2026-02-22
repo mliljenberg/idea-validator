@@ -61,7 +61,8 @@ impl KeyStore {
 
         if google_provided && !presence.google_api_key_set {
             return Err(
-                "Google API key was submitted but could not be verified from OS keychain.".to_string(),
+                "Google API key was submitted but could not be verified from OS keychain."
+                    .to_string(),
             );
         }
         if brave_provided && !presence.brave_api_key_set {
@@ -72,7 +73,8 @@ impl KeyStore {
         }
         if gemini_provided && !presence.gemini_api_key_set {
             return Err(
-                "Gemini API key was submitted but could not be verified from OS keychain.".to_string(),
+                "Gemini API key was submitted but could not be verified from OS keychain."
+                    .to_string(),
             );
         }
 
@@ -174,14 +176,7 @@ fn set_value(account: &str, value: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn get_value(account: &str) -> Result<Option<String>, String> {
     let mut cmd = Command::new("security");
-    cmd.args([
-        "find-generic-password",
-        "-s",
-        SERVICE,
-        "-a",
-        account,
-        "-w",
-    ]);
+    cmd.args(["find-generic-password", "-s", SERVICE, "-a", account, "-w"]);
 
     let output = command_output(&mut cmd)?;
     if output.status.success() {

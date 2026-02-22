@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -8,27 +8,32 @@ import {
   backendStatus,
   keysGetMasked,
   keysSet,
+  sessionMessagesAppend,
+  sessionMessagesGet,
+  sessionPhaseGet,
   sessionCreate,
+  sessionDelete,
   sessionList,
   streamCancel,
   streamRun
 } from "./lib/api";
-import { appendMessage, makeMessage } from "./lib/chat";
+import { appendMessage } from "./lib/chat";
+import { upsertToolEvent } from "./lib/toolEvents";
 import type {
   AgentStreamPayload,
   BackendStatus,
   ChatMessage,
   KeyPresence,
+  RunMode,
+  SessionPhase,
   RunState,
   SessionMeta
 } from "./lib/types";
 
 const USER_ID = "local-user";
 const APP_STORAGE_KEY = "pv_desktop_selected_app";
-const SESSION_NAMES_STORAGE_KEY = "pv_desktop_session_names";
-const SESSION_MESSAGES_STORAGE_KEY = "pv_desktop_session_messages";
 type StreamProgressPayload = Extract<AgentStreamPayload, { kind: "stream_progress" }>;
-type StreamToolPayload = Extract<AgentStreamPayload, { kind: "stream_tool" }> & { at: number };
+type StreamToolDisplayEvent = ReturnType<typeof upsertToolEvent>[number];
 type SummarySection = { title: string; body: string };
 
 function hasRequiredKeys(keys: KeyPresence | null): boolean {
@@ -38,6 +43,14 @@ function hasRequiredKeys(keys: KeyPresence | null): boolean {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function isApprovalIntent(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(approved|approve|go ahead|go-ahead|proceed|run research|start research|yes)\b/.test(
+    normalized
+  );
 }
 
 function stripStructuredJsonBlocks(input: string): string {
@@ -233,9 +246,8 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [messagesBySession, setMessagesBySession] = useState<Record<string, ChatMessage[]>>({});
   const [pendingAssistantBySession, setPendingAssistantBySession] = useState<Record<string, string>>({});
-  const [sessionNames, setSessionNames] = useState<Record<string, string>>({});
   const [progressBySession, setProgressBySession] = useState<Record<string, StreamProgressPayload>>({});
-  const [toolEventsBySession, setToolEventsBySession] = useState<Record<string, StreamToolPayload[]>>({});
+  const [toolEventsBySession, setToolEventsBySession] = useState<Record<string, StreamToolDisplayEvent[]>>({});
   const [composer, setComposer] = useState("");
   const [runState, setRunState] = useState<RunState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -250,6 +262,13 @@ export default function App() {
   const geminiKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeMessages = messagesBySession[activeSessionId] || [];
+  const activeSessionMeta = sessions.find((session) => session.id === activeSessionId) || null;
+  const activePhase: SessionPhase = activeSessionMeta?.phase || "idea_input";
+  const activeReadOnly = Boolean(activeSessionMeta?.readOnly);
+  const canSendFreeText =
+    !activeReadOnly && (activePhase === "idea_input" || activePhase === "awaiting_approval");
+  const showApproveButton =
+    !activeReadOnly && activePhase === "awaiting_approval" && !runState?.running;
   const activePendingAssistant = pendingAssistantBySession[activeSessionId] || "";
   const activeProgress = progressBySession[activeSessionId];
   const activeToolEvents = toolEventsBySession[activeSessionId] || [];
@@ -275,6 +294,10 @@ export default function App() {
         setSelectedApp("");
         setSessions([]);
         setActiveSessionId("");
+        setMessagesBySession({});
+        setPendingAssistantBySession({});
+        setProgressBySession({});
+        setToolEventsBySession({});
         return;
       }
 
@@ -302,23 +325,49 @@ export default function App() {
     }
   };
 
-  const refreshSessions = async (appName: string) => {
-    const result = await sessionList({ appName, userId: USER_ID });
-    const ordered = [...result].sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0));
+  const mapStoredMessage = (message: {
+    id: string;
+    role: string;
+    text: string;
+    status: string;
+    createdAtMs: number;
+  }): ChatMessage => {
+    const role = message.role === "assistant" || message.role === "system" ? message.role : "user";
+    const status =
+      message.status === "streaming" || message.status === "error" ? message.status : "done";
 
-    let effective = ordered;
+    return {
+      id: message.id,
+      role,
+      text: message.text,
+      status,
+      createdAt: message.createdAtMs
+    };
+  };
+
+  const loadMessagesForSession = async (sessionId: string) => {
+    const stored = await sessionMessagesGet({ sessionId });
+    setMessagesBySession((prev) => ({
+      ...prev,
+      [sessionId]: stored.map(mapStoredMessage)
+    }));
+  };
+
+  const refreshSessions = async (appName: string, preferredSessionId?: string) => {
+    const result = await sessionList({ appName, userId: USER_ID });
+    let effective = result;
     if (!effective.length) {
       const created = await sessionCreate({ appName, userId: USER_ID });
       effective = [created];
     }
 
     setSessions(effective);
-    setActiveSessionId((prev) => {
-      if (prev && effective.some((s) => s.id === prev)) {
-        return prev;
-      }
-      return effective[0].id;
-    });
+    const nextActive =
+      (preferredSessionId && effective.some((s) => s.id === preferredSessionId) && preferredSessionId) ||
+      (activeSessionId && effective.some((s) => s.id === activeSessionId) && activeSessionId) ||
+      effective[0].id;
+    setActiveSessionId(nextActive);
+    await loadMessagesForSession(nextActive);
   };
 
   const newSession = async () => {
@@ -326,6 +375,54 @@ export default function App() {
     const created = await sessionCreate({ appName: selectedApp, userId: USER_ID });
     setSessions((prev) => [created, ...prev]);
     setActiveSessionId(created.id);
+    setMessagesBySession((prev) => ({ ...prev, [created.id]: [] }));
+    setPendingAssistantBySession((prev) => ({ ...prev, [created.id]: "" }));
+    setToolEventsBySession((prev) => ({ ...prev, [created.id]: [] }));
+  };
+
+  const removeSessionFromLocalState = (sessionId: string) => {
+    setMessagesBySession((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setPendingAssistantBySession((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setProgressBySession((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    setToolEventsBySession((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+  };
+
+  const deleteSessionById = async (sessionId: string) => {
+    if (!selectedApp) return;
+    const target = sessions.find((session) => session.id === sessionId);
+    const label = target?.title?.trim() || sessionLabel(sessionId, 0);
+    const confirmed = window.confirm(`Delete session "${label}"? This cannot be undone.`);
+    if (!confirmed) {
+      return;
+    }
+
+    if (runState?.running && runState.sessionId === sessionId) {
+      await streamCancel(runState.requestId);
+      setRunState((prev) => (prev ? { ...prev, running: false } : prev));
+    }
+
+    await sessionDelete({ sessionId });
+    removeSessionFromLocalState(sessionId);
+
+    const remaining = sessions.filter((session) => session.id !== sessionId);
+    const preferredNext = remaining[0]?.id;
+    await refreshSessions(selectedApp, preferredNext);
   };
 
   useEffect(() => {
@@ -333,43 +430,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(SESSION_NAMES_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, string>;
-      if (parsed && typeof parsed === "object") {
-        setSessionNames(parsed);
-      }
-    } catch {
-      // Ignore malformed local storage.
+    if (!activeSessionId || messagesBySession[activeSessionId]) {
+      return;
     }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(SESSION_NAMES_STORAGE_KEY, JSON.stringify(sessionNames));
-  }, [sessionNames]);
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(SESSION_MESSAGES_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, ChatMessage[]>;
-      if (parsed && typeof parsed === "object") {
-        setMessagesBySession(parsed);
-      }
-    } catch {
-      // Ignore malformed local storage.
-    }
-  }, []);
-
-  useEffect(() => {
-    const compact: Record<string, ChatMessage[]> = {};
-    for (const [sessionId, messages] of Object.entries(messagesBySession)) {
-      if (!messages.length) continue;
-      compact[sessionId] = messages.slice(-40);
-    }
-    localStorage.setItem(SESSION_MESSAGES_STORAGE_KEY, JSON.stringify(compact));
-  }, [messagesBySession]);
+    void loadMessagesForSession(activeSessionId).catch((e) => setError(String(e)));
+  }, [activeSessionId, messagesBySession]);
 
   useEffect(() => {
     if (needsInitialKeySetup) {
@@ -406,7 +471,7 @@ export default function App() {
   useEffect(() => {
     if (!autoScroll || !transcriptRef.current) return;
     transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
-  }, [activeMessages, autoScroll]);
+  }, [activeMessages, activeToolEvents, activeProgress, activePendingAssistant, showRunStatusCard, autoScroll]);
 
   const readKeysWithRetry = async () => {
     let snapshot = await keysGetMasked();
@@ -464,46 +529,35 @@ export default function App() {
     }
   };
 
-  const sendMessage = async () => {
-    const text = composer.trim();
-    if (!text || !selectedApp || runState?.running) return;
-    if (!hasRequiredKeys(keyPresence)) {
-      setError("Add required API keys before running validation.");
-      return;
-    }
-    setError("");
-
-    let sessionId = activeSessionId;
-    if (!sessionId) {
-      const created = await sessionCreate({ appName: selectedApp, userId: USER_ID });
-      sessionId = created.id;
-      setSessions((prev) => [created, ...prev]);
-      setActiveSessionId(sessionId);
-    }
-
-    const userMessage = makeMessage("user", text, "done");
-
-    setSessionNames((prev) => {
-      if (prev[sessionId]) {
-        return prev;
-      }
-      const normalized = text.replace(/\s+/g, " ").trim();
-      if (!normalized) {
-        return prev;
-      }
-      return {
-        ...prev,
-        [sessionId]: normalized.length > 44 ? `${normalized.slice(0, 44)}...` : normalized
-      };
+  const appendPersistedMessage = async (
+    sessionId: string,
+    role: "user" | "assistant",
+    text: string,
+    status: "done" | "error"
+  ) => {
+    const stored = await sessionMessagesAppend({
+      sessionId,
+      role,
+      text,
+      status
     });
-
+    const mapped = mapStoredMessage(stored);
     setMessagesBySession((prev) => ({
       ...prev,
-      [sessionId]: appendMessage(prev[sessionId] || [], userMessage)
+      [sessionId]: appendMessage(prev[sessionId] || [], mapped)
     }));
+  };
 
-    setComposer("");
-
+  const runAgent = async ({
+    text,
+    runMode,
+    sessionId
+  }: {
+    text: string;
+    runMode: RunMode;
+    sessionId: string;
+  }) => {
+    const appName = selectedApp;
     const requestId = crypto.randomUUID();
     setRunState({ requestId, sessionId, running: true, startedAt: Date.now() });
     setPendingAssistantBySession((prev) => ({
@@ -520,6 +574,10 @@ export default function App() {
         toolsCompleted: 0,
         toolsTotal: 0
       }
+    }));
+    setToolEventsBySession((prev) => ({
+      ...prev,
+      [sessionId]: []
     }));
 
     let latestAssistantText = "";
@@ -548,24 +606,20 @@ export default function App() {
       }
 
       if (payload.kind === "stream_tool") {
+        const now = Date.now();
         setToolEventsBySession((prev) => ({
           ...prev,
-          [sessionId]: [{ ...payload, at: Date.now() }, ...(prev[sessionId] || [])].slice(0, 120)
+          [sessionId]: upsertToolEvent(prev[sessionId] || [], payload, now)
         }));
       }
 
       if (payload.kind === "stream_error") {
+        const errorText = `Error: ${payload.message}`;
         setPendingAssistantBySession((prev) => ({
           ...prev,
           [sessionId]: ""
         }));
-        setMessagesBySession((prev) => ({
-          ...prev,
-          [sessionId]: appendMessage(
-            prev[sessionId] || [],
-            makeMessage("assistant", `Error: ${payload.message}`, "error")
-          )
-        }));
+        void appendPersistedMessage(sessionId, "assistant", errorText, "error");
         setProgressBySession((prev) => ({
           ...prev,
           [sessionId]: {
@@ -580,19 +634,14 @@ export default function App() {
         setRunState((prev) =>
           prev && prev.requestId === requestId ? { ...prev, running: false, error: payload.message } : prev
         );
+        void refreshSessions(appName, sessionId).catch((e) => setError(String(e)));
         void unlisten();
       }
 
       if (payload.kind === "stream_done") {
-        const finalText = latestAssistantText.trim();
+        const finalText = sanitizeAgentText(latestAssistantText);
         if (finalText) {
-          setMessagesBySession((prev) => ({
-            ...prev,
-            [sessionId]: appendMessage(
-              prev[sessionId] || [],
-              makeMessage("assistant", finalText, "done")
-            )
-          }));
+          void appendPersistedMessage(sessionId, "assistant", finalText, "done");
         }
         setPendingAssistantBySession((prev) => ({
           ...prev,
@@ -612,6 +661,7 @@ export default function App() {
         setRunState((prev) =>
           prev && prev.requestId === requestId ? { ...prev, running: false } : prev
         );
+        void refreshSessions(appName, sessionId).catch((e) => setError(String(e)));
         void unlisten();
       }
     });
@@ -622,26 +672,109 @@ export default function App() {
         appName: selectedApp,
         userId: USER_ID,
         sessionId,
-        text
+        text,
+        runMode
       });
-      await refreshSessions(selectedApp);
     } catch (e) {
+      const failure = String(e);
       setPendingAssistantBySession((prev) => ({
         ...prev,
         [sessionId]: ""
       }));
-      setMessagesBySession((prev) => ({
-        ...prev,
-        [sessionId]: appendMessage(
-          prev[sessionId] || [],
-          makeMessage("assistant", `Error: ${String(e)}`, "error")
-        )
-      }));
+      void appendPersistedMessage(sessionId, "assistant", `Error: ${failure}`, "error");
       setRunState((prev) =>
-        prev && prev.requestId === requestId ? { ...prev, running: false, error: String(e) } : prev
+        prev && prev.requestId === requestId ? { ...prev, running: false, error: failure } : prev
       );
+      void refreshSessions(appName, sessionId).catch((refreshError) => setError(String(refreshError)));
       void unlisten();
     }
+  };
+
+  const sendMessage = async () => {
+    const text = composer.trim();
+    if (!text || !selectedApp || runState?.running || !canSendFreeText) return;
+    if (!hasRequiredKeys(keyPresence)) {
+      setError("Add required API keys before running validation.");
+      return;
+    }
+    setError("");
+
+    let sessionId = activeSessionId;
+    if (!sessionId) {
+      const created = await sessionCreate({ appName: selectedApp, userId: USER_ID });
+      sessionId = created.id;
+      setSessions((prev) => [created, ...prev]);
+      setActiveSessionId(sessionId);
+    }
+
+    const latestPhaseState = await sessionPhaseGet({ sessionId });
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              phase: latestPhaseState.phase,
+              readOnly: latestPhaseState.readOnly,
+              updatedAtMs: Date.now()
+            }
+          : session
+      )
+    );
+
+    if (latestPhaseState.readOnly) {
+      setError(`Session is read-only in phase '${latestPhaseState.phase}'.`);
+      return;
+    }
+
+    await appendPersistedMessage(sessionId, "user", text, "done");
+    setComposer("");
+
+    const runMode: RunMode =
+      latestPhaseState.phase === "idea_input"
+        ? "idea"
+        : isApprovalIntent(text)
+          ? "approve"
+          : "edit_plan";
+
+    if (runMode === "approve") {
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                phase: "running",
+                readOnly: true,
+                updatedAtMs: Date.now()
+              }
+            : session
+        )
+      );
+    }
+
+    await runAgent({ text, runMode, sessionId });
+  };
+
+  const approveAndRun = async () => {
+    if (!selectedApp || !activeSessionId || runState?.running || activePhase !== "awaiting_approval") {
+      return;
+    }
+
+    const approvalText = "Approved. Run the full research now.";
+    setError("");
+    await appendPersistedMessage(activeSessionId, "user", approvalText, "done");
+    setSessions((prev) =>
+      prev.map((session) =>
+        session.id === activeSessionId
+          ? {
+              ...session,
+              phase: "running",
+              readOnly: true,
+              updatedAtMs: Date.now()
+            }
+          : session
+      )
+    );
+    await runAgent({ text: approvalText, runMode: "approve", sessionId: activeSessionId });
   };
 
   const stopRun = async () => {
@@ -652,6 +785,9 @@ export default function App() {
       [runState.sessionId]: ""
     }));
     setRunState((prev) => (prev ? { ...prev, running: false } : prev));
+    if (selectedApp) {
+      await refreshSessions(selectedApp, runState.sessionId);
+    }
   };
 
   const statusLabel = useMemo(() => {
@@ -675,8 +811,9 @@ export default function App() {
   };
 
   const sessionLabel = (sessionId: string, index: number): string => {
-    const persisted = sessionNames[sessionId]?.trim();
-    if (persisted) {
+    const session = sessions.find((item) => item.id === sessionId);
+    const persisted = session?.title?.trim();
+    if (persisted && persisted.length > 0) {
       return persisted;
     }
     const messages = messagesBySession[sessionId] || [];
@@ -687,6 +824,65 @@ export default function App() {
     }
     return seed.length > 44 ? `${seed.slice(0, 44)}...` : seed;
   };
+
+  const latestUserMessageIndex = useMemo(() => {
+    for (let i = activeMessages.length - 1; i >= 0; i -= 1) {
+      if (activeMessages[i].role === "user") {
+        return i;
+      }
+    }
+    return -1;
+  }, [activeMessages]);
+
+  const renderThinkingCard = () => (
+    <div className="animate-riseIn max-w-[88%] rounded-2xl border border-neon-cyan/35 bg-gradient-to-br from-neon-cyan/10 via-white/5 to-neon-mint/10 px-4 py-3">
+      <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-300">
+        <span className="h-2 w-2 rounded-full bg-neon-cyan animate-pulseSoft" />
+        <span>Thinking</span>
+      </div>
+      <p className="text-sm text-slate-100">{progressStage}</p>
+      <p className="mt-1 text-xs text-slate-400">Progress {progressPercent}%</p>
+      {activePendingAssistant ? (
+        <p className="mt-2 text-xs text-slate-300">Drafting response...</p>
+      ) : null}
+      {latestToolActivity.length > 0 ? (
+        <div className="mt-3 space-y-1.5">
+          {latestToolActivity.map((event, eventIdx) => (
+            <div key={`${event.at}-${eventIdx}`} className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                    event.phase === "start"
+                      ? "bg-neon-cyan/20 text-cyan-200"
+                      : event.phase === "done"
+                        ? "bg-neon-mint/20 text-emerald-200"
+                        : "bg-white/15 text-slate-200"
+                  }`}
+                >
+                  {event.phase}
+                </span>
+                <div className="flex items-center gap-2">
+                  {event.count > 1 ? (
+                    <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-slate-200">x{event.count}</span>
+                  ) : null}
+                  <span className="text-[10px] text-slate-400">{new Date(event.at).toLocaleTimeString()}</span>
+                </div>
+              </div>
+              <div className="mt-1 text-slate-100">{event.name.replace(/[_-]/g, " ")}</div>
+              {event.query ? (
+                <div className="mt-1 break-words text-[11px] text-neon-cyan">{event.query}</div>
+              ) : null}
+              {event.detail ? (
+                <div className="mt-1 break-words text-[11px] text-slate-300">{event.detail}</div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-1 text-xs text-slate-400">Preparing source agents and collecting evidence...</p>
+      )}
+    </div>
+  );
 
   if (keyPresence === null) {
     return (
@@ -808,21 +1004,37 @@ export default function App() {
 
           <div className="scrollbar flex-1 space-y-2 overflow-auto pr-1">
             {sessions.map((s, idx) => (
-              <button
+              <div
                 key={s.id}
-                onClick={() => setActiveSessionId(s.id)}
                 className={`w-full rounded-xl border px-3 py-2 text-left text-xs transition ${
                   s.id === activeSessionId
                     ? "border-neon-cyan/70 bg-neon-cyan/10 text-white"
                     : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
                 }`}
               >
-                <div className="text-sm font-medium text-slate-100">{sessionLabel(s.id, idx)}</div>
-                <div className="mt-1 text-[11px] text-slate-400">
-                  {s.lastUpdateTime ? new Date(s.lastUpdateTime * 1000).toLocaleString() : "No updates"}
+                <div className="flex items-start justify-between gap-2">
+                  <button
+                    onClick={() => setActiveSessionId(s.id)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <div className="truncate text-sm font-medium text-slate-100">{sessionLabel(s.id, idx)}</div>
+                    <div className="mt-1 text-[11px] text-slate-400">
+                      {s.updatedAtMs ? new Date(s.updatedAtMs).toLocaleString() : "No updates"}
+                    </div>
+                    <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-slate-500">
+                      {s.phase.replace("_", " ")}
+                    </div>
+                    <div className="mt-1 font-mono text-[10px] text-slate-500">{s.id.slice(0, 8)}</div>
+                  </button>
+                  <button
+                    className="rounded-md border border-neon-rose/40 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-rose-200 hover:bg-neon-rose/15"
+                    onClick={() => void deleteSessionById(s.id)}
+                    title="Delete session"
+                  >
+                    Delete
+                  </button>
                 </div>
-                <div className="mt-1 font-mono text-[10px] text-slate-500">{s.id.slice(0, 8)}</div>
-              </button>
+              </div>
             ))}
           </div>
         </aside>
@@ -862,160 +1074,92 @@ export default function App() {
               </div>
             ) : null}
 
-            {showRunStatusCard ? (
-              <div className="animate-riseIn max-w-[88%] rounded-2xl border border-neon-cyan/35 bg-gradient-to-br from-neon-cyan/10 via-white/5 to-neon-mint/10 px-4 py-3">
-                <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-300">
-                  <span className="h-2 w-2 rounded-full bg-neon-cyan animate-pulseSoft" />
-                  <span>Thinking</span>
-                </div>
-                <p className="text-sm text-slate-100">
-                  {progressStage}
-                </p>
-                <p className="mt-1 text-xs text-slate-400">Progress {progressPercent}%</p>
-                {activePendingAssistant ? (
-                  <p className="mt-2 text-xs text-slate-300">
-                    Drafting response...
-                  </p>
-                ) : null}
-                {latestToolActivity.length > 0 ? (
-                  <div className="mt-3 space-y-1.5">
-                    {latestToolActivity.map((event, eventIdx) => (
-                      <div key={`${event.at}-${eventIdx}`} className="rounded-lg border border-white/10 bg-black/35 px-2.5 py-1.5 text-xs">
-                        <div className="flex items-center justify-between gap-2">
-                          <span
-                            className={`rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
-                              event.phase === "start"
-                                ? "bg-neon-cyan/20 text-cyan-200"
-                                : event.phase === "done"
-                                  ? "bg-neon-mint/20 text-emerald-200"
-                                  : "bg-white/15 text-slate-200"
-                            }`}
-                          >
-                            {event.phase}
-                          </span>
-                          <span className="text-[10px] text-slate-400">{new Date(event.at).toLocaleTimeString()}</span>
-                        </div>
-                        <div className="mt-1 text-slate-100">{event.name.replace(/[_-]/g, " ")}</div>
-                        {event.query ? (
-                          <div className="mt-1 break-words text-[11px] text-neon-cyan">{event.query}</div>
-                        ) : null}
-                        {event.detail ? (
-                          <div className="mt-1 break-words text-[11px] text-slate-300">{event.detail}</div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-1 text-xs text-slate-400">Preparing source agents and collecting evidence...</p>
-                )}
-              </div>
-            ) : null}
-
             {activeMessages.map((m, idx) => {
-              const isLatest = idx === activeMessages.length - 1;
               const cleanedAssistantText = m.role === "assistant" ? sanitizeAgentText(m.text) : m.text;
               const split = m.role === "assistant" ? extractSummarySections(cleanedAssistantText) : { preface: "", sections: [] as SummarySection[] };
               const hasSummarySections = split.sections.length > 0;
-              const showLiveWorkingState =
-                m.role === "assistant" &&
-                isLatest &&
-                m.status === "streaming" &&
-                !cleanedAssistantText;
+              const showThinkingAfterThisMessage =
+                showRunStatusCard &&
+                m.role === "user" &&
+                idx === latestUserMessageIndex;
 
               if (m.role === "assistant" && hasSummarySections) {
                 return (
-                  <div key={m.id} className="animate-riseIn max-w-[92%] space-y-2">
-                    <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Agent</div>
+                  <Fragment key={m.id}>
+                    <div className="animate-riseIn max-w-[92%] space-y-2">
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Agent</div>
 
-                    {split.preface ? (
-                      <div className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3">
-                        <article className="markdown-body text-sm leading-relaxed">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{split.preface}</ReactMarkdown>
-                        </article>
-                      </div>
-                    ) : null}
-
-                    {split.sections.map((section, sectionIdx) => (
-                      <details
-                        key={`${m.id}-summary-${sectionIdx}`}
-                        className="summary-bar overflow-hidden rounded-xl border border-white/15 bg-black/35"
-                        open={sectionIdx === 0}
-                      >
-                        <summary className="cursor-pointer list-none px-3 py-2 text-sm font-semibold text-slate-100">
-                          <span>{section.title}</span>
-                        </summary>
-                        <div className="border-t border-white/10 px-3 py-2">
+                      {split.preface ? (
+                        <div className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3">
                           <article className="markdown-body text-sm leading-relaxed">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{split.preface}</ReactMarkdown>
                           </article>
                         </div>
-                      </details>
-                    ))}
+                      ) : null}
 
-                    <div className="text-[11px] text-slate-400">
-                      {new Date(m.createdAt).toLocaleTimeString()} · {m.status}
+                      {split.sections.map((section, sectionIdx) => (
+                        <details
+                          key={`${m.id}-summary-${sectionIdx}`}
+                          className="summary-bar overflow-hidden rounded-xl border border-white/15 bg-black/35"
+                          open={sectionIdx === 0}
+                        >
+                          <summary className="cursor-pointer list-none px-3 py-2 text-sm font-semibold text-slate-100">
+                            <span>{section.title}</span>
+                          </summary>
+                          <div className="border-t border-white/10 px-3 py-2">
+                            <article className="markdown-body text-sm leading-relaxed">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.body}</ReactMarkdown>
+                            </article>
+                          </div>
+                        </details>
+                      ))}
+
+                      <div className="text-[11px] text-slate-400">
+                        {new Date(m.createdAt).toLocaleTimeString()} · {m.status}
+                      </div>
                     </div>
-                  </div>
+                    {showThinkingAfterThisMessage ? renderThinkingCard() : null}
+                  </Fragment>
                 );
               }
 
               return (
-                <div key={m.id} className="animate-riseIn">
-                  <div
-                    className={`max-w-[84%] rounded-2xl border px-4 py-3 ${
-                      m.role === "user"
-                        ? "ml-auto border-neon-cyan/40 bg-neon-cyan/10"
-                        : m.status === "error"
-                          ? "border-neon-rose/50 bg-neon-rose/10"
-                          : "border-white/15 bg-white/5"
-                    }`}
-                  >
-                    <div className="mb-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
-                      {m.role === "user" ? "You" : "Agent"}
-                    </div>
-
-                    {m.role === "assistant" && cleanedAssistantText ? (
-                      <article className="markdown-body text-sm leading-relaxed">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanedAssistantText}</ReactMarkdown>
-                      </article>
-                    ) : showLiveWorkingState ? (
-                      <div className="space-y-2">
-                        <p className="text-sm text-slate-100">
-                          Working on: <span className="text-neon-cyan">{progressStage}</span>
-                        </p>
-                        <p className="text-xs text-slate-400">Progress {progressPercent}%</p>
-                        {latestToolActivity.length > 0 ? (
-                          <div className="space-y-1">
-                            {latestToolActivity.map((event, eventIdx) => (
-                              <div key={`${event.at}-${eventIdx}`} className="rounded border border-white/10 bg-black/30 px-2 py-1 text-xs">
-                                <span className="uppercase text-[10px] tracking-[0.12em] text-slate-400">{event.phase}</span>
-                                <span className="ml-2 text-slate-200">{event.name.replace(/[_-]/g, " ")}</span>
-                                {event.query ? (
-                                  <div className="mt-1 break-words text-[11px] text-neon-cyan">{event.query}</div>
-                                ) : null}
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="text-xs text-slate-400">Preparing source agents and collecting evidence...</p>
-                        )}
+                <Fragment key={m.id}>
+                  <div className="animate-riseIn">
+                    <div
+                      className={`max-w-[84%] rounded-2xl border px-4 py-3 ${
+                        m.role === "user"
+                          ? "ml-auto border-neon-cyan/40 bg-neon-cyan/10"
+                          : m.status === "error"
+                            ? "border-neon-rose/50 bg-neon-rose/10"
+                            : "border-white/15 bg-white/5"
+                      }`}
+                    >
+                      <div className="mb-1 text-[11px] uppercase tracking-[0.16em] text-slate-400">
+                        {m.role === "user" ? "You" : "Agent"}
                       </div>
-                    ) : (
-                      <p className="whitespace-pre-wrap text-sm leading-relaxed">
-                        {m.text || (m.status === "streaming" ? <span className="typing-cursor">Thinking</span> : "")}
-                      </p>
-                    )}
 
-                    <div className="mt-2 text-[11px] text-slate-400">
-                      {new Date(m.createdAt).toLocaleTimeString()} · {m.status}
+                      {m.role === "assistant" && cleanedAssistantText ? (
+                        <article className="markdown-body text-sm leading-relaxed">
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanedAssistantText}</ReactMarkdown>
+                        </article>
+                      ) : (
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed">
+                          {m.text || (m.status === "streaming" ? <span className="typing-cursor">Thinking</span> : "")}
+                        </p>
+                      )}
+
+                      <div className="mt-2 text-[11px] text-slate-400">
+                        {new Date(m.createdAt).toLocaleTimeString()} · {m.status}
+                      </div>
                     </div>
                   </div>
-                  {isLatest && m.status === "streaming" ? (
-                    <div className="mt-2 h-[2px] w-24 animate-pulseSoft rounded bg-gradient-to-r from-neon-cyan to-neon-mint" />
-                  ) : null}
-                </div>
+                  {showThinkingAfterThisMessage ? renderThinkingCard() : null}
+                </Fragment>
               );
             })}
+
+            {showRunStatusCard && latestUserMessageIndex === -1 ? renderThinkingCard() : null}
           </div>
 
           {!autoScroll ? (
@@ -1033,29 +1177,65 @@ export default function App() {
           ) : null}
 
           <div className="border-t border-white/10 px-5 py-4">
-            <textarea
-              value={composer}
-              onChange={(e) => setComposer(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void sendMessage();
-                }
-              }}
-              placeholder="Describe a product idea, niche, or pivot to validate..."
-              className="h-24 w-full resize-none rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none ring-neon-cyan/50 transition focus:ring"
-            />
-            <div className="mt-3 flex items-center justify-between">
-              <div className="text-xs text-slate-400">Enter to send · Shift+Enter newline</div>
-              <div className="flex gap-2">
-                <button className="btn-secondary" onClick={() => void stopRun()} disabled={!runState?.running}>
-                  Stop
-                </button>
-                <button className="btn-primary" onClick={() => void sendMessage()} disabled={busy || !!runState?.running}>
-                  Send
-                </button>
+            {canSendFreeText ? (
+              <>
+                <textarea
+                  value={composer}
+                  onChange={(e) => setComposer(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void sendMessage();
+                    }
+                  }}
+                  placeholder={
+                    activePhase === "idea_input"
+                      ? "Describe a product idea, niche, or pivot to validate..."
+                      : "Request plan edits before approving..."
+                  }
+                  className="h-24 w-full resize-none rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none ring-neon-cyan/50 transition focus:ring"
+                />
+                <div className="mt-3 flex items-center justify-between">
+                  <div className="text-xs text-slate-400">
+                    {activePhase === "idea_input"
+                      ? "Plan drafting mode · Enter to send · Shift+Enter newline"
+                      : "Plan refinement mode · Enter to send · Shift+Enter newline"}
+                  </div>
+                  <div className="flex gap-2">
+                    <button className="btn-secondary" onClick={() => void stopRun()} disabled={!runState?.running}>
+                      Stop
+                    </button>
+                    {showApproveButton ? (
+                      <button className="btn-secondary" onClick={() => void approveAndRun()} disabled={busy || !!runState?.running}>
+                        Approve and Run Research
+                      </button>
+                    ) : null}
+                    <button
+                      className="btn-primary"
+                      onClick={() => void sendMessage()}
+                      disabled={busy || !!runState?.running}
+                    >
+                      {activePhase === "idea_input" ? "Send Idea" : "Update Plan"}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
+                  {activePhase === "running"
+                    ? "Research is running. This session is read-only until the run completes."
+                    : activePhase === "completed"
+                      ? "Research completed. This session is now read-only."
+                      : "Session is in failed state and read-only."}
+                </div>
+                <div className="flex justify-end">
+                  <button className="btn-secondary" onClick={() => void stopRun()} disabled={!runState?.running}>
+                    Stop
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </main>
 

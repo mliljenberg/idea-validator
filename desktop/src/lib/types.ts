@@ -1,5 +1,7 @@
 export type MessageRole = "user" | "assistant" | "system";
 export type MessageStatus = "done" | "streaming" | "error";
+export type SessionPhase = "idea_input" | "awaiting_approval" | "running" | "completed" | "failed";
+export type RunMode = "idea" | "edit_plan" | "approve";
 
 export interface ChatMessage {
   id: string;
@@ -29,9 +31,27 @@ export interface BackendStatus {
 
 export interface SessionMeta {
   id: string;
+  title: string;
   appName: string;
   userId: string;
-  lastUpdateTime?: number;
+  phase: SessionPhase;
+  readOnly: boolean;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export interface SessionMessage {
+  id: string;
+  sessionId: string;
+  role: MessageRole;
+  text: string;
+  status: MessageStatus;
+  createdAtMs: number;
+}
+
+export interface SessionPhaseState {
+  phase: SessionPhase;
+  readOnly: boolean;
 }
 
 export interface Ack {
@@ -78,6 +98,7 @@ export interface StreamRunInput {
   userId: string;
   sessionId: string;
   text: string;
+  runMode: RunMode;
   invocationId?: string;
 }
 
@@ -90,6 +111,32 @@ export interface SessionCreateInput {
 export interface SessionListInput {
   appName: string;
   userId: string;
+}
+
+export interface SessionDeleteInput {
+  sessionId: string;
+}
+
+export interface SessionMessagesGetInput {
+  sessionId: string;
+}
+
+export interface SessionMessageAppendInput {
+  sessionId: string;
+  role: MessageRole;
+  text: string;
+  status: MessageStatus;
+  createdAtMs?: number;
+}
+
+export interface SessionPhaseGetInput {
+  sessionId: string;
+}
+
+export interface SessionPhaseSetInput {
+  sessionId: string;
+  phase: SessionPhase;
+  readOnly: boolean;
 }
 
 export interface BackendStartConfig {

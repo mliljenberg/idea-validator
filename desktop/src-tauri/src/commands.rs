@@ -4,14 +4,20 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::backend::{choose_default_app, BackendManager};
 use crate::keyring_store::KeyStore;
-use crate::stream;
+use crate::session_store::{phase_after_run, SessionStore};
+use crate::stream::{self, StreamOutcome};
 use crate::types::{
-    Ack, BackendStartConfig, BackendStatus, KeyPresence, KeysInput, SessionCreateInput,
-    SessionListInput, SessionMeta, StreamRunInput,
+    Ack, BackendStartConfig, BackendStatus, KeyPresence, KeysInput, RunMode, SessionCreateInput,
+    SessionDeleteInput, SessionListInput, SessionMessage, SessionMessageAppendInput,
+    SessionMessagesGetInput, SessionMeta, SessionPhase, SessionPhaseGetInput, SessionPhaseSetInput,
+    SessionPhaseState, StreamRunInput,
 };
+
+const REPLAY_DEPTH: usize = 20;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +34,10 @@ impl AppState {
             key_store: KeyStore::default(),
         }
     }
+}
+
+fn local_store(app: &AppHandle) -> Result<SessionStore, String> {
+    SessionStore::from_app(app)
 }
 
 #[tauri::command]
@@ -96,7 +106,9 @@ pub async fn backend_list_apps(state: State<'_, AppState>) -> Result<Vec<String>
             .await?;
 
         if !restarted.running || !restarted.health {
-            return Err("Backend is unavailable; failed to recover before listing apps.".to_string());
+            return Err(
+                "Backend is unavailable; failed to recover before listing apps.".to_string(),
+            );
         }
     }
 
@@ -111,39 +123,63 @@ pub async fn backend_list_apps(state: State<'_, AppState>) -> Result<Vec<String>
 
 #[tauri::command]
 pub async fn session_create(
-    state: State<'_, AppState>,
+    app: AppHandle,
     input: SessionCreateInput,
 ) -> Result<SessionMeta, String> {
-    let mut backend = state.backend.lock().await;
-    let (status, _) = backend.status().await?;
-    if !status.running {
-        return Err("Backend is not running. Start backend before creating sessions.".to_string());
-    }
-
-    let session = backend
-        .create_session(
-            &input.app_name,
-            &input.user_id,
-            input.session_id.as_deref(),
-        )
-        .await?;
-
-    backend.set_app_name(Some(input.app_name));
-    Ok(session)
+    local_store(&app)?.create_session(&input)
 }
 
 #[tauri::command]
 pub async fn session_list(
-    state: State<'_, AppState>,
+    app: AppHandle,
     input: SessionListInput,
 ) -> Result<Vec<SessionMeta>, String> {
-    let mut backend = state.backend.lock().await;
-    let (status, _) = backend.status().await?;
-    if !status.running {
-        return Err("Backend is not running. Start backend before listing sessions.".to_string());
-    }
+    local_store(&app)?.list_sessions(&input)
+}
 
-    backend.list_sessions(&input.app_name, &input.user_id).await
+#[tauri::command]
+pub async fn session_delete(app: AppHandle, input: SessionDeleteInput) -> Result<Ack, String> {
+    let deleted = local_store(&app)?.delete_session(&input.session_id)?;
+    Ok(Ack {
+        ok: true,
+        message: Some(if deleted {
+            "Session deleted".to_string()
+        } else {
+            "Session not found".to_string()
+        }),
+    })
+}
+
+#[tauri::command]
+pub async fn session_messages_get(
+    app: AppHandle,
+    input: SessionMessagesGetInput,
+) -> Result<Vec<SessionMessage>, String> {
+    local_store(&app)?.messages_get(&input.session_id)
+}
+
+#[tauri::command]
+pub async fn session_messages_append(
+    app: AppHandle,
+    input: SessionMessageAppendInput,
+) -> Result<SessionMessage, String> {
+    local_store(&app)?.message_append(&input)
+}
+
+#[tauri::command]
+pub async fn session_phase_get(
+    app: AppHandle,
+    input: SessionPhaseGetInput,
+) -> Result<SessionPhaseState, String> {
+    local_store(&app)?.phase_get(&input.session_id)
+}
+
+#[tauri::command]
+pub async fn session_phase_set(
+    app: AppHandle,
+    input: SessionPhaseSetInput,
+) -> Result<SessionPhaseState, String> {
+    local_store(&app)?.phase_set(&input.session_id, input.phase, input.read_only)
 }
 
 #[tauri::command]
@@ -155,6 +191,12 @@ pub async fn stream_run(
     if input.text.trim().is_empty() {
         return Err("Message text is required.".to_string());
     }
+
+    let store = local_store(&app)?;
+    store.validate_run_mode(&input.session_id, input.run_mode)?;
+
+    let replay_messages = store.replay_messages(&input.session_id, &input.text, REPLAY_DEPTH)?;
+    let session_store_path = store.db_path();
 
     let base_url = {
         let mut backend = state.backend.lock().await;
@@ -180,7 +222,10 @@ pub async fn stream_run(
                 .await?;
 
             if !restarted.health {
-                return Err("Backend is unhealthy and restart failed. Please restart the desktop app.".to_string());
+                return Err(
+                    "Backend is unhealthy and restart failed. Please restart the desktop app."
+                        .to_string(),
+                );
             }
             restarted.base_url
         }
@@ -197,20 +242,54 @@ pub async fn stream_run(
     let app_handle = app.clone();
     let request_id = input.request_id.clone();
     let stream_map = state.stream_tokens.clone();
+    let run_mode = input.run_mode;
+    let desktop_session_id = input.session_id.clone();
+    let mut adk_input = input.clone();
+    adk_input.session_id = format!("adk-{}", Uuid::new_v4());
+
+    if run_mode == RunMode::Approve {
+        store.phase_set(&desktop_session_id, SessionPhase::Running, true)?;
+    }
 
     tokio::spawn(async move {
-        if let Err(err) = stream::run_stream_task(app_handle.clone(), base_url, input, token).await {
-            let event_name = format!("agent-stream:{}", request_id);
-            let _ = app_handle.emit(
-                &event_name,
-                serde_json::json!({
-                    "kind": "stream_error",
-                    "requestId": request_id,
-                    "message": err,
-                    "retryable": true
-                }),
-            );
-        }
+        let task_store = SessionStore::from_path(session_store_path);
+        let outcome = stream::run_stream_task(
+            app_handle.clone(),
+            base_url,
+            adk_input,
+            replay_messages,
+            token,
+        )
+        .await;
+
+        let succeeded = match outcome {
+            Ok(StreamOutcome::Completed) => true,
+            Ok(StreamOutcome::Failed) => false,
+            Err(err) => {
+                let event_name = format!("agent-stream:{}", request_id);
+                let _ = app_handle.emit(
+                    &event_name,
+                    serde_json::json!({
+                        "kind": "stream_error",
+                        "requestId": request_id,
+                        "message": err,
+                        "retryable": true
+                    }),
+                );
+                let _ = app_handle.emit(
+                    &event_name,
+                    serde_json::json!({
+                        "kind": "stream_done",
+                        "requestId": request_id,
+                        "usage": null
+                    }),
+                );
+                false
+            }
+        };
+
+        let (phase, read_only) = phase_after_run(run_mode, succeeded);
+        let _ = task_store.phase_set(&desktop_session_id, phase, read_only);
 
         let mut map = stream_map.lock().await;
         map.remove(&request_id);
@@ -223,10 +302,7 @@ pub async fn stream_run(
 }
 
 #[tauri::command]
-pub async fn stream_cancel(
-    state: State<'_, AppState>,
-    request_id: String,
-) -> Result<Ack, String> {
+pub async fn stream_cancel(state: State<'_, AppState>, request_id: String) -> Result<Ack, String> {
     let mut map = state.stream_tokens.lock().await;
     if let Some(token) = map.remove(&request_id) {
         token.cancel();
