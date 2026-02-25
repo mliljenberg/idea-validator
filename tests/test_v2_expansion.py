@@ -1,8 +1,10 @@
 """Tests for buyer-intent source expansion and stricter synthesis rules."""
 
 from product_validator_search.agent import (
+    ResearchPlan,
     SOURCE_NAMES,
     final_validator,
+    plan_generator,
     market_research,
     buyer_intent_research,
 )
@@ -33,6 +35,29 @@ def test_new_sources_registered():
     assert "review_sites_agent" in buyer_names
     assert "jobs_signal_agent" in buyer_names
     assert "seo_intent_agent" in buyer_names
+
+
+def test_research_plan_supports_dual_hypothesis_fields():
+    model_fields = ResearchPlan.model_fields
+    assert "validation_keywords" in model_fields
+    assert "invalidation_keywords" in model_fields
+    assert "validation_focus" in model_fields
+    assert "invalidation_focus" in model_fields
+    assert "falsification_criteria" in model_fields
+    assert "deep_dive_hypotheses" in model_fields
+    assert "evidence_validation_rules" in model_fields
+
+
+def test_plan_generator_requires_invalidation_track():
+    prompt = plan_generator.instruction
+    assert "Thesis + anti-thesis required" in prompt
+    assert "validation_keywords" in prompt
+    assert "invalidation_keywords" in prompt
+    assert "falsification_criteria" in prompt
+    assert "deep_dive_hypotheses" in prompt
+    assert "evidence_validation_rules" in prompt
+    assert "Material evidence requires" in prompt
+    assert "Source rationale must mention invalidation value" in prompt
 
 
 def test_buyer_intent_validation_schemas():
@@ -90,9 +115,20 @@ def test_final_validator_includes_evidence_and_contradictions_rules():
     prompt = final_validator.instruction
     assert "## Evidence Quality" in prompt
     assert "## Contradictions" in prompt
+    assert "## What Would Invalidate This Idea" in prompt
+    assert "## What Was Actually Invalidated" in prompt
+    assert "## Falsification Criteria Check" in prompt
+    assert "## Supporting Evidence Reliability Assessment" in prompt
+    assert "## Contradiction Reliability Assessment" in prompt
+    assert "## Deep-Dive Verification Outcomes" in prompt
+    assert "## Net Evidence Conclusion" in prompt
     assert "## Why This Might Still Fail" in prompt
     assert "source citation" in prompt
     assert "contradiction penalty" in prompt
+    assert "critical invalidation findings" in prompt
+    assert "falsification criteria" in prompt
+    assert "Weak supporting evidence cannot count toward `PROCEED` thresholds." in prompt
+    assert "Weak contradictions reduce confidence" in prompt
     assert "Cap confidence at `medium`" in prompt
     assert "reason taxonomy tag" in prompt
 
@@ -112,3 +148,8 @@ def test_source_weight_config_defaults():
     }
     assert set(config.source_evidence_weights) == expected
     assert config.source_evidence_weights["review_sites"] > config.source_evidence_weights["reddit"]
+    assert config.adaptive_refinement_rounds == 2
+    assert config.adaptive_run_condition == "conditional"
+    assert config.adaptive_max_queries_per_round == 4
+    assert config.evidence_corroboration_bar == "moderate"
+    assert config.social_weak_signal_max_impact == "warning"

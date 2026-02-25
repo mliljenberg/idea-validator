@@ -140,13 +140,13 @@ pub async fn session_list(
 #[tauri::command]
 pub async fn session_delete(app: AppHandle, input: SessionDeleteInput) -> Result<Ack, String> {
     let deleted = local_store(&app)?.delete_session(&input.session_id)?;
+    if !deleted {
+        return Err(format!("Session '{}' was not found.", input.session_id));
+    }
+
     Ok(Ack {
         ok: true,
-        message: Some(if deleted {
-            "Session deleted".to_string()
-        } else {
-            "Session not found".to_string()
-        }),
+        message: Some("Session deleted".to_string()),
     })
 }
 

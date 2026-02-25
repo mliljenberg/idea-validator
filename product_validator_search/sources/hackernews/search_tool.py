@@ -7,7 +7,7 @@ Provides two ADK-compatible tool functions:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -81,11 +81,17 @@ def _flatten_comments(
     return flat
 
 
-def get_hackernews_comments(object_id: str) -> dict[str, Any]:
+def get_hackernews_comments(
+    object_id: str,
+    max_depth: int = 3,
+    comment_limit: Optional[int] = None,
+) -> dict[str, Any]:
     """Fetch a Hacker News post and its full comment tree.
 
     Args:
         object_id: The HN item ID (objectID from search results).
+        max_depth: Maximum comment nesting depth to flatten (default 3).
+        comment_limit: Optional cap on flattened comments returned.
 
     Returns:
         A dict with 'title', 'url', 'points', and 'comments' — a flat list of
@@ -98,7 +104,9 @@ def get_hackernews_comments(object_id: str) -> dict[str, Any]:
     r.raise_for_status()
     item = r.json()
 
-    comments = _flatten_comments(item.get("children", []))
+    comments = _flatten_comments(item.get("children", []), max_depth=max_depth)
+    if comment_limit is not None and comment_limit > 0:
+        comments = comments[:comment_limit]
 
     return {
         "objectID": object_id,

@@ -18,6 +18,13 @@ body {
   background: #05070f;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
 pre,
 code,
 .font-mono {

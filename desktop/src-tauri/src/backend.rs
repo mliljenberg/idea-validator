@@ -14,7 +14,6 @@ use crate::types::{BackendStartConfig, BackendStatus};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 8765;
-const STARTUP_RETRIES: u16 = 16;
 const MAX_LOG_LINES: usize = 200;
 const LOG_TAIL_LINES: usize = 40;
 
@@ -72,75 +71,63 @@ impl BackendManager {
         self.last_error = None;
         self.clear_logs();
 
-        let start_port = self.port;
-        let mut startup_error: Option<String> = None;
-
-        for offset in 0..STARTUP_RETRIES {
-            let candidate_port = start_port + offset;
-            if !is_port_available(&self.host, candidate_port) {
-                startup_error = Some(format!(
-                    "Port {} is already in use on host {}. Trying next port.",
-                    candidate_port, self.host
-                ));
-                continue;
-            }
-
-            let child = match spawn_backend(
-                &self.host,
-                candidate_port,
-                &self.repo_root,
-                keys,
-                self.log_lines.clone(),
-            )
-            .await
-            {
-                Ok(child) => child,
-                Err(err) => {
-                    if err.contains("No such file or directory") {
-                        return Err(
-                            "`uv` not found. Install uv and ensure it is on PATH before starting desktop backend."
-                                .to_string(),
-                        );
-                    }
-                    startup_error = Some(err);
-                    continue;
-                }
-            };
-
-            if await_health(&self.host, candidate_port).await {
-                self.child = Some(child);
-                self.port = candidate_port;
-
-                let apps = self.list_apps().await.unwrap_or_default();
-                self.app_name = choose_default_app(&apps);
-
-                let (status, _) = self.status().await?;
-                return Ok(status);
-            }
-
-            let mut child = child;
-            let startup_failure = match child.try_wait() {
-                Ok(Some(exit_status)) => {
-                    format!("Backend exited during startup (status: {exit_status}).")
-                }
-                Ok(None) => format!(
-                    "Backend did not become healthy at http://{}:{} within startup timeout.",
-                    self.host, candidate_port
-                ),
-                Err(err) => format!("Failed to inspect backend process during startup: {err}"),
-            };
-
-            let detailed = self.compose_error_with_log_tail(startup_failure);
-            self.last_error = Some(detailed.clone());
-            startup_error = Some(detailed);
-
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+        if !is_port_available(&self.host, self.port) {
+            return Err(format!(
+                "Port {} is already in use on host {}. Fixed-port mode is enabled; stop the process using this port and retry.",
+                self.port, self.host
+            ));
         }
 
-        Err(startup_error.unwrap_or_else(|| {
-            "Failed to start ADK web backend after retries. Check logs and API keys.".to_string()
-        }))
+        let child = match spawn_backend(
+            &self.host,
+            self.port,
+            &self.repo_root,
+            keys,
+            self.log_lines.clone(),
+        )
+        .await
+        {
+            Ok(child) => child,
+            Err(err) => {
+                if err.contains("No such file or directory") {
+                    return Err(
+                        "`uv` not found. Install uv and ensure it is on PATH before starting desktop backend."
+                            .to_string(),
+                    );
+                }
+                return Err(err);
+            }
+        };
+
+        if await_health(&self.host, self.port).await {
+            self.child = Some(child);
+
+            let apps = self.list_apps().await.unwrap_or_default();
+            self.app_name = choose_default_app(&apps);
+
+            let (status, _) = self.status().await?;
+            return Ok(status);
+        }
+
+        let mut child = child;
+        let startup_failure = match child.try_wait() {
+            Ok(Some(exit_status)) => {
+                format!("Backend exited during startup (status: {exit_status}).")
+            }
+            Ok(None) => format!(
+                "Backend did not become healthy at http://{}:{} within startup timeout.",
+                self.host, self.port
+            ),
+            Err(err) => format!("Failed to inspect backend process during startup: {err}"),
+        };
+
+        let detailed = self.compose_error_with_log_tail(startup_failure);
+        self.last_error = Some(detailed.clone());
+
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+
+        Err(detailed)
     }
 
     pub async fn stop(&mut self) -> Result<(), String> {

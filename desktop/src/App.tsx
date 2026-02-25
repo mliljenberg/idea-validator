@@ -252,6 +252,7 @@ export default function App() {
   const [runState, setRunState] = useState<RunState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
+  const [deletingSessionId, setDeletingSessionId] = useState<string>("");
   const [keyPresence, setKeyPresence] = useState<KeyPresence | null>(null);
   const [keyForm, setKeyForm] = useState({ googleApiKey: "", braveApiKey: "", geminiApiKey: "" });
   const [autoScroll, setAutoScroll] = useState(true);
@@ -404,25 +405,27 @@ export default function App() {
   };
 
   const deleteSessionById = async (sessionId: string) => {
-    if (!selectedApp) return;
-    const target = sessions.find((session) => session.id === sessionId);
-    const label = target?.title?.trim() || sessionLabel(sessionId, 0);
-    const confirmed = window.confirm(`Delete session "${label}"? This cannot be undone.`);
-    if (!confirmed) {
-      return;
+    if (!selectedApp || deletingSessionId) return;
+    try {
+      setDeletingSessionId(sessionId);
+      setError("");
+
+      if (runState?.running && runState.sessionId === sessionId) {
+        await streamCancel(runState.requestId);
+        setRunState((prev) => (prev ? { ...prev, running: false } : prev));
+      }
+
+      await sessionDelete({ sessionId });
+      removeSessionFromLocalState(sessionId);
+
+      const remaining = sessions.filter((session) => session.id !== sessionId);
+      const preferredNext = remaining[0]?.id;
+      await refreshSessions(selectedApp, preferredNext);
+    } catch (e) {
+      setError(`Failed to delete session: ${String(e)}`);
+    } finally {
+      setDeletingSessionId("");
     }
-
-    if (runState?.running && runState.sessionId === sessionId) {
-      await streamCancel(runState.requestId);
-      setRunState((prev) => (prev ? { ...prev, running: false } : prev));
-    }
-
-    await sessionDelete({ sessionId });
-    removeSessionFromLocalState(sessionId);
-
-    const remaining = sessions.filter((session) => session.id !== sessionId);
-    const preferredNext = remaining[0]?.id;
-    await refreshSessions(selectedApp, preferredNext);
   };
 
   useEffect(() => {
@@ -970,11 +973,11 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-ink-950 text-slate-100">
+    <div className="h-dvh overflow-hidden bg-ink-950 text-slate-100">
       <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(ellipse_at_top_right,_rgba(0,208,255,0.14),_transparent_45%),radial-gradient(ellipse_at_bottom_left,_rgba(255,79,136,0.12),_transparent_45%)]" />
 
-      <div className="relative mx-auto grid h-screen max-w-[1600px] grid-cols-[270px_1fr] gap-4 p-4">
-        <aside className="panel flex flex-col gap-4">
+      <div className="relative mx-auto grid h-full min-h-0 max-w-[1600px] grid-cols-[270px_1fr] gap-4 p-4">
+        <aside className="panel min-h-0 flex flex-col gap-4 overflow-hidden">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-neon-cyan">Product Validator</p>
             <h1 className="mt-2 text-2xl font-semibold leading-tight">Agent Control Center</h1>
@@ -1002,7 +1005,7 @@ export default function App() {
             </button>
           </div>
 
-          <div className="scrollbar flex-1 space-y-2 overflow-auto pr-1">
+          <div className="scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
             {sessions.map((s, idx) => (
               <div
                 key={s.id}
@@ -1028,10 +1031,16 @@ export default function App() {
                   </button>
                   <button
                     className="rounded-md border border-neon-rose/40 px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-rose-200 hover:bg-neon-rose/15"
-                    onClick={() => void deleteSessionById(s.id)}
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      event.preventDefault();
+                      void deleteSessionById(s.id);
+                    }}
                     title="Delete session"
+                    disabled={Boolean(deletingSessionId)}
                   >
-                    Delete
+                    {deletingSessionId === s.id ? "Deleting..." : "Delete"}
                   </button>
                 </div>
               </div>
@@ -1039,8 +1048,8 @@ export default function App() {
           </div>
         </aside>
 
-        <main className="panel relative flex flex-col overflow-hidden">
-          <div className="border-b border-white/10 px-5 py-3">
+        <main className="panel relative min-h-0 flex flex-col overflow-hidden">
+          <div className="shrink-0 border-b border-white/10 px-5 py-3">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs uppercase tracking-[0.18em] text-neon-mint">Live Stream</p>
@@ -1067,7 +1076,11 @@ export default function App() {
             </div>
           </div>
 
-          <div ref={transcriptRef} onScroll={onScrollTranscript} className="scrollbar flex-1 space-y-3 overflow-auto px-5 py-4">
+          <div
+            ref={transcriptRef}
+            onScroll={onScrollTranscript}
+            className="scrollbar min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4"
+          >
             {activeMessages.length === 0 && !showRunStatusCard ? (
               <div className="rounded-2xl border border-dashed border-white/20 bg-white/5 p-8 text-center text-slate-300">
                 Start by sending a product idea. Streaming output and function/tool events will appear live.
@@ -1176,7 +1189,7 @@ export default function App() {
             </button>
           ) : null}
 
-          <div className="border-t border-white/10 px-5 py-4">
+          <div className="shrink-0 border-t border-white/10 px-5 py-4">
             {canSendFreeText ? (
               <>
                 <textarea

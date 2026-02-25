@@ -16,12 +16,19 @@ _TIMEOUT = 10.0
 _USER_AGENT = "product-validator/0.1"
 
 
-def search_reddit(query: str, num_results: int = 10) -> dict[str, Any]:
+def search_reddit(
+    query: str,
+    num_results: int = 10,
+    sort: str = "relevance",
+    time_window: str = "year",
+) -> dict[str, Any]:
     """Search Reddit posts by keyword.
 
     Args:
         query: The search query string.
         num_results: Maximum number of results to return (default 10).
+        sort: Sorting mode for Reddit search (default "relevance").
+        time_window: Time filter for search (default "year").
 
     Returns:
         A dict with 'query' and 'posts' — a list of post dicts.
@@ -33,7 +40,12 @@ def search_reddit(query: str, num_results: int = 10) -> dict[str, Any]:
 
         r = httpx.get(
             f"{_REDDIT_BASE}/search.json",
-            params={"q": query, "limit": num_results, "sort": "relevance", "t": "year"},
+            params={
+                "q": query,
+                "limit": num_results,
+                "sort": sort,
+                "t": time_window,
+            },
             headers=headers,
             timeout=_TIMEOUT,
             follow_redirects=True,
@@ -63,11 +75,17 @@ def search_reddit(query: str, num_results: int = 10) -> dict[str, Any]:
     return {"query": query, "posts": posts}
 
 
-def get_reddit_comments(url: str) -> dict[str, Any]:
+def get_reddit_comments(
+    url: str,
+    comment_limit: int = 10,
+    sort: str = "top",
+) -> dict[str, Any]:
     """Fetch a Reddit post and its top comments.
 
     Args:
         url: The full URL of the Reddit post.
+        comment_limit: Maximum number of root comments to return (default 10).
+        sort: Comment sort order (default "top").
 
     Returns:
         A dict with post details and a list of top comments.
@@ -83,6 +101,7 @@ def get_reddit_comments(url: str) -> dict[str, Any]:
 
         r = httpx.get(
             url,
+            params={"sort": sort},
             headers=headers,
             timeout=_TIMEOUT,
             follow_redirects=True,
@@ -123,5 +142,5 @@ def get_reddit_comments(url: str) -> dict[str, Any]:
         "title": post_data.get("title", ""),
         "subreddit": post_data.get("subreddit", ""),
         "score": post_data.get("score", 0),
-        "comments": comments[:10],  # Limit to top 10 root comments
+        "comments": comments[: max(1, comment_limit)],
     }

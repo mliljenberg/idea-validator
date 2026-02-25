@@ -103,12 +103,62 @@ class ResearchPlan(BaseModel):
     search_keywords: list[str] = Field(
         description="3-6 diverse keywords/phrases the source agents should use as starting points."
     )
+    validation_keywords: list[str] = Field(
+        default_factory=list,
+        description=(
+            "3-6 keywords/phrases focused on validating the idea thesis. "
+            "If empty, source agents should fall back to `search_keywords`."
+        ),
+    )
+    invalidation_keywords: list[str] = Field(
+        default_factory=list,
+        description=(
+            "3-6 keywords/phrases focused on disproving/falsifying the idea. "
+            "If empty, source agents should derive skeptical variants from "
+            "`search_keywords`."
+        ),
+    )
     research_focus: str = Field(
         description=(
             "A brief directive telling the source agents what specifically "
             "to look for (e.g. 'focus on pain points around X and existing "
             "competitors in Y space')."
         )
+    )
+    validation_focus: str = Field(
+        default="",
+        description=(
+            "Focused instruction for what would count as strong supporting "
+            "evidence for this idea."
+        ),
+    )
+    invalidation_focus: str = Field(
+        default="",
+        description=(
+            "Focused instruction for what would count as disconfirming "
+            "evidence that invalidates this idea."
+        ),
+    )
+    falsification_criteria: list[str] = Field(
+        default_factory=list,
+        description=(
+            "3-5 concrete kill conditions that, if met, should strongly push "
+            "the verdict toward pivot or abandon."
+        ),
+    )
+    deep_dive_hypotheses: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Specific claims that require follow-up verification during "
+            "adaptive query refinement rounds."
+        ),
+    )
+    evidence_validation_rules: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Rules that define what counts as material evidence vs weak "
+            "evidence for BOTH supporting and contradictory claims."
+        ),
     )
     sources_rationale: str = Field(
         default="",
@@ -145,8 +195,23 @@ guide parallel research agents.
 
 ## Guidelines
 - **Select relevant sources only**: Don't just select all. If it's a B2B SaaS, `reddit` might be weak but `competitors` is critical. If it's a deep-tech AI tool, `openalex` and `github` are essential.
-- **Keywords**: Generate 3-6 diverse search phrases.
-- **Focus**: Write a clear `research_focus` to guide the agents.
+- **Thesis + anti-thesis required**: Explicitly plan how to test both why the idea might work and why it might fail.
+- **Keywords**:
+  - Fill `search_keywords` with 3-6 broad base phrases.
+  - Fill `validation_keywords` with 3-6 supporting-evidence phrases.
+  - Fill `invalidation_keywords` with 3-6 falsification phrases.
+- **Focus**:
+  - Fill `research_focus` as the overall research direction.
+  - Fill `validation_focus` with what positive evidence should look like.
+  - Fill `invalidation_focus` with what disconfirming evidence should look like.
+- **Falsification criteria**: Fill `falsification_criteria` with 3-5 concrete kill conditions.
+- **Deep-dive hypotheses**: Fill `deep_dive_hypotheses` with 2-5 high-impact claims that should trigger follow-up query refinement if evidence is thin or conflicting.
+- **Evidence validation rules**: Fill `evidence_validation_rules` with concrete corroboration rules for BOTH supporting evidence and contradiction evidence.
+  - Default corroboration bar is moderate:
+    - Material evidence requires at least 2 independent datapoints in one source, OR 1 strong datapoint corroborated by another selected source.
+    - Weak evidence cannot drive recommendation changes by itself.
+    - Social low-signal reactions (emoji jokes, one-off comments) are warning-only unless corroborated.
+- **Source rationale must mention invalidation value**: In `sources_rationale`, include not only why each source can validate demand, but also what it can reveal to invalidate the idea.
 
 Available sources: {", ".join(SOURCE_NAMES)}
 """,
@@ -227,6 +292,33 @@ If recommendation is PIVOT or ABANDON, explicitly say: "This is a bad idea in it
 Add a one-line reason taxonomy tag: one of
 `no-demand`, `crowded-market`, `weak-differentiation`, `distribution-risk`, `execution-risk`.
 
+## What Would Invalidate This Idea
+- List the `falsification_criteria` from `research_plan`.
+- If `falsification_criteria` is empty, infer 3-5 concrete criteria and say they were inferred.
+- Apply `evidence_validation_rules` from `research_plan` where available.
+
+## What Was Actually Invalidated
+- List specific disconfirming findings discovered across sources.
+- Separate critical blockers vs non-critical warnings.
+
+## Falsification Criteria Check
+- For each criterion, mark status as: `triggered`, `partially_triggered`, or `not_triggered`.
+- Include source citations for each status.
+
+## Supporting Evidence Reliability Assessment
+- Classify supporting evidence as `material_supporting_evidence` vs `weak_supporting_evidence`.
+- Explain corroboration quality and why weak evidence is non-decisive.
+- If no explicit `evidence_validation_rules` are provided, use moderate corroboration defaults.
+
+## Contradiction Reliability Assessment
+- Classify contradictions as `material_contradictions` vs `weak_contradictions`.
+- Explicitly mark one-off social reactions as weak warnings unless corroborated.
+
+## Deep-Dive Verification Outcomes
+- Summarize follow-up checks run by source agents (`deep_dive_actions_taken`).
+- State which high-impact claims were confirmed, unresolved, or downgraded.
+- Use `deep_dive_hypotheses` from `research_plan` as the baseline checklist when present.
+
 ## Source-by-Source Findings
 
 ### Competitor Landscape (Product Hunt, AppSumo, X)
@@ -264,6 +356,10 @@ Is the value clear and differentiated? Is the problem painful enough to pay for?
 - Required bullet list of contradictions across sources.
 - Include at least one contradiction when signals conflict, otherwise write "No major contradictions found."
 
+## Net Evidence Conclusion
+- Explain how supporting evidence and disconfirming evidence were weighted against each other.
+- State clearly why the final recommendation is not overly optimistic.
+
 ## Key Risks
 - Bullet list of significant risks
 
@@ -299,15 +395,25 @@ At least 2 concrete, actionable alternatives. Only include paths supported by ev
   - jobs_signal: 0.07
   - seo_intent: 0.07
 - Apply a contradiction penalty of -12 to the final signal score when demand is high but saturation/differentiation is poor.
+- Apply additional penalties for unresolved disconfirming evidence:
+  - -10 for each critical blocker that is not credibly mitigated.
+  - -6 for each falsification criterion marked `triggered`.
+  - -3 for each falsification criterion marked `partially_triggered`.
+- Reliability handling:
+  - Weak supporting evidence cannot count toward `PROCEED` thresholds.
+  - Only material supporting evidence can satisfy a "strong source" contribution.
+  - Weak contradictions reduce confidence, not recommendation, unless corroborated into material contradictions.
+  - If supporting evidence is mostly weak/unconfirmed, downgrade recommendation even if narrative appears positive.
 - Be conservative by default. `PROCEED` is rare and requires strong, multi-source evidence of demand, differentiation, and viable execution.
 - Recommendation thresholds:
-  - `PROCEED`: only when at least 3 independent sources show strong signal, no critical red flags, and a clear wedge.
+  - `PROCEED`: only when at least 3 independent sources show MATERIAL supporting signal, no critical invalidation findings (material contradictions), and most falsification criteria are `not_triggered`.
   - `PIVOT`: mixed evidence, weak differentiation, or clear demand but wrong approach/segment.
   - `ABANDON`: low demand, severe saturation with no wedge, major trust/regulatory blocker, or weak evidence quality.
 - Confidence calibration:
   - Cap confidence at `medium` unless at least 3 strong sources agree and data is reasonably fresh.
   - Reduce confidence for stale, thin, or conflicting evidence.
 - If evidence is weak or conflicting, never output `PROCEED`.
+- Every verdict justification must cite BOTH supporting and disconfirming evidence.
 - Always provide at least 2 pivot/alternative paths at the end.
 """,
     output_key="final_validation",
@@ -386,11 +492,19 @@ multiple data sources.
 
 1. **Plan** — When the user describes a product idea (or asks any product
    question), IMMEDIATELY call `plan_generator` to create a research plan.
-   Present the plan to the user clearly, including:
+   Present the plan to the user clearly in these blocks:
+   - **How we will validate**
+   - **How we will try to invalidate**
+   - **What would kill this idea**
+   - **How we will verify supporting evidence**
+   - **How we will verify contradiction evidence**
+   Include:
    - The product idea as you understood it
    - Which sources will be queried and why
-   - The search keywords that will be used
-   - What the research will focus on
+   - Validation keywords and invalidation keywords
+   - Overall focus plus validation focus and invalidation focus
+   - The falsification criteria
+   - Deep-dive hypotheses and evidence validation rules
 
 2. **Refine** — If the user wants changes (different keywords, different
    sources, adjusted focus), call `plan_generator` again with the revised

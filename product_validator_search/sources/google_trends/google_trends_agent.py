@@ -30,6 +30,12 @@ class GoogleTrendsValidation(BaseModel):
     confidence: Literal["low", "medium", "high"]
     evidence_strength: int = Field(default=0, ge=0, le=100)
     evidence_quality: Literal["weak", "moderate", "strong"] = "weak"
+    material_supporting_evidence: list[str] = Field(default_factory=list)
+    weak_supporting_evidence: list[str] = Field(default_factory=list)
+    material_contradictions: list[str] = Field(default_factory=list)
+    weak_contradictions: list[str] = Field(default_factory=list)
+    deep_dive_actions_taken: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
     key_findings: list[str] = Field(default_factory=list)
     trend_direction: Literal["rising", "stable", "declining", "volatile", "no_data"] = (
         "no_data"
@@ -54,40 +60,76 @@ demand trajectory and public interest around a product idea using Google
 Trends data.
 
 ## Getting your inputs
-Read the `research_plan` from session state. It contains:
+Read the `research_plan` from session state.
+Use `deep_dive_hypotheses` and `evidence_validation_rules` if present.
+It contains:
 - `product_idea` — the idea to validate
 - `selected_sources` — list of sources to use
 - `search_keywords` — suggested starting keywords
+- `validation_keywords` — keywords for supportive evidence
+- `invalidation_keywords` — keywords for disconfirming evidence
 - `research_focus` — what to focus on
+- `validation_focus` / `invalidation_focus` — focused directions per track
 
 **IMPORTANT:** If "google_trends" is NOT in `selected_sources`, output
 "Source not selected — skipped." and stop. Do not call any tools.
 
 ## Steps (only if selected)
 
-1. **Generate keywords** — Use the `search_keywords` from the plan as a
-   starting point, then derive 3-5 keywords/phrases to investigate. Include:
+1. **Generate dual-track keywords** — Prefer `validation_keywords` for support
+   signals and `invalidation_keywords` for failure signals. If either is
+   missing, fall back to `search_keywords` and derive both supportive and
+   skeptical variants. Use `validation_focus` and `invalidation_focus` when
+   present, otherwise fall back to `research_focus`.
+   Derive 4-8 total keywords/phrases to investigate. Include:
    - The product concept itself (e.g. "AI code review")
    - The core problem it solves (e.g. "code review automation")
    - Key competitor or category names (e.g. "CodeRabbit", "Codacy")
    - The broader market category (e.g. "developer tools")
-   Keep the `research_focus` in mind.
 
-2. **Check interest over time** — Call `get_trends_interest_over_time` with
-   your keywords (max 5 per call). This gives you 12-month trend data.
+2. **Validation track** — Run at least 2 validation probes. Call
+   `get_trends_interest_over_time` with validation keywords (max 5 per call).
+   This gives you 12-month trend data.
    Analyze: is interest growing, stable, or declining?
 
-3. **Get related queries** — For the 2-3 most relevant keywords, call
+3. **Invalidation track** — Run at least 2 invalidation probes. Call
+   `get_trends_interest_over_time` with invalidation keywords to test decline,
+   weak intent, or fading categories.
+
+4. **Get related queries** — For the 2-3 most relevant keywords, call
    `get_trends_related_queries` to discover what people also search for.
    This reveals adjacent demand, competitor awareness, and emerging niches.
 
-4. **Compose report** — Write a detailed raw research report covering:
+5. **Compose report** — Write a detailed raw research report covering:
    - Trend direction for each keyword (rising/stable/declining)
    - First vs. latest interest values and overall trajectory
    - Notable related queries — especially "rising" ones (breakout demand)
    - Comparison between the product concept vs. competitors/alternatives
    - Whether timing looks favorable (growing interest) or risky (declining)
    - Any seasonal patterns visible in the data
+   The raw report MUST include:
+   - Supporting evidence
+   - Disconfirming evidence
+   - Contradictions
+   - Data quality gaps
+   - Material supporting evidence (corroborated)
+   - Weak supporting evidence (non-decisive)
+   - Material contradictions (corroborated)
+   - Weak contradictions (warning-only unless corroborated)
+   - Deep-dive actions taken
+   - Evidence gaps
+   - Provisional source verdict: `pass`, `warning`, or `fail`
+
+6. **Adaptive refinement loop** — Before finalizing the report:
+   - Run initial validation/invalidation probes first.
+   - Run up to 2 conditional refinement rounds.
+   - Trigger refinement when evidence is thin, conflicting, or high-impact on either side.
+   - In each round, create up to 4 targeted follow-up queries from observed claims/entities.
+   - Stop early when evidence is strong, convergent, and high-impact claims are resolved.
+   - Use moderate corroboration for BOTH support and contradiction:
+     - material = at least 2 independent datapoints in-source, OR 1 strong datapoint corroborated by another source.
+     - weak = not sufficiently corroborated; cannot drive recommendation alone.
+   - Treat social low-signal reactions (emoji jokes, one-off comments) as weak warnings unless corroborated.
 
 Save your full report as plain text. This will be passed to a validator agent
 for synthesis.
@@ -132,6 +174,14 @@ Evaluate the evidence and produce a structured assessment:
 Be careful: Google Trends measures search interest, not market size. A rising
 trend in a niche keyword may still be a small market. A declining trend might
 mean the problem is solved, not that demand disappeared. Interpret carefully.
+
+Evidence reliability rules:
+- Populate `material_supporting_evidence`, `weak_supporting_evidence`, `material_contradictions`, `weak_contradictions`, `deep_dive_actions_taken`, and `evidence_gaps`.
+- Use moderate corroboration for BOTH support and contradiction:
+  - material = at least 2 independent datapoints in-source, OR 1 strong datapoint corroborated by another source.
+  - weak = not sufficiently corroborated.
+- Weak evidence cannot drive recommendation changes alone.
+- One-off social low-signal reactions are weak warnings unless corroborated.
 
 Recommendation rules:
 - Default to skeptical because trend data is noisy.

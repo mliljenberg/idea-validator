@@ -31,6 +31,12 @@ class OpenAlexValidation(BaseModel):
     confidence: Literal["low", "medium", "high"]
     evidence_strength: int = Field(default=0, ge=0, le=100)
     evidence_quality: Literal["weak", "moderate", "strong"] = "weak"
+    material_supporting_evidence: list[str] = Field(default_factory=list)
+    weak_supporting_evidence: list[str] = Field(default_factory=list)
+    material_contradictions: list[str] = Field(default_factory=list)
+    weak_contradictions: list[str] = Field(default_factory=list)
+    deep_dive_actions_taken: list[str] = Field(default_factory=list)
+    evidence_gaps: list[str] = Field(default_factory=list)
     key_findings: list[str] = Field(default_factory=list)
     research_maturity: Literal["nascent", "emerging", "established", "saturated"] = (
         "nascent"
@@ -54,43 +60,79 @@ You are an academic research specialist. Your job is to investigate the
 scholarly landscape around a product idea using OpenAlex.
 
 ## Getting your inputs
-Read the `research_plan` from session state. It contains:
+Read the `research_plan` from session state.
+Use `deep_dive_hypotheses` and `evidence_validation_rules` if present.
+It contains:
 - `product_idea` — the idea to validate
 - `selected_sources` — list of sources to use
 - `search_keywords` — suggested starting keywords
+- `validation_keywords` — keywords for supportive evidence
+- `invalidation_keywords` — keywords for disconfirming evidence
 - `research_focus` — what to focus on
+- `validation_focus` / `invalidation_focus` — focused directions per track
 
 **IMPORTANT:** If "openalex" is NOT in `selected_sources`, output
 "Source not selected — skipped." and stop. Do not call any tools.
 
 ## Steps (only if selected)
 
-1. **Generate queries** — Use the `search_keywords` from the plan as a
-   starting point, then derive 2-4 additional search queries targeting:
+1. **Generate dual-track queries** — Use `validation_keywords` and
+   `invalidation_keywords` from the plan. If either is missing, fall back to
+   `search_keywords` and derive both supportive and skeptical variants.
+   Keep `validation_focus` and `invalidation_focus` in mind when present,
+   otherwise use `research_focus`.
+   Build queries targeting:
    - The core technology or methodology
    - The problem domain or pain point
    - Adjacent or competing approaches
    - Application areas
-   Keep the `research_focus` in mind.
 
-2. **Search** — Call `search_openalex` for each query. Collect all results.
+2. **Validation track search** — Call `search_openalex` for at least
+   2 validation queries. Collect results.
 
-3. **Select top 5** — From all combined results, pick the 5 most relevant
+3. **Invalidation track search** — Call `search_openalex` for at least
+   2 invalidation queries to find prior-art saturation, practical blockers,
+   and low-readiness signals. Collect results.
+
+4. **Select top 5** — From all combined results, pick the 5 most relevant
    works. Prioritize by: relevance to the product idea, citation count
    (higher = more influential), and recency (prefer recent work showing
    active research).
 
-4. **Fetch details** — For each of the 5 selected works, call
+5. **Fetch details** — For each of the 5 selected works, call
    `get_openalex_work_details` with its `id` to get the full metadata
    including the abstract.
 
-5. **Compose report** — Write a detailed raw research report covering:
+6. **Compose report** — Write a detailed raw research report covering:
    - Each paper's title, year, citation count, abstract summary
    - Key concepts and research themes
    - Whether the research indicates an unsolved problem (opportunity) or
      a well-established solution (competition risk)
    - Signs of industry–academia crossover (commercial potential)
    - Overall maturity of the research area
+   The raw report MUST include:
+   - Supporting evidence
+   - Disconfirming evidence
+   - Contradictions
+   - Data quality gaps
+   - Material supporting evidence (corroborated)
+   - Weak supporting evidence (non-decisive)
+   - Material contradictions (corroborated)
+   - Weak contradictions (warning-only unless corroborated)
+   - Deep-dive actions taken
+   - Evidence gaps
+   - Provisional source verdict: `pass`, `warning`, or `fail`
+
+7. **Adaptive refinement loop** — Before finalizing the report:
+   - Run initial validation/invalidation probes first.
+   - Run up to 2 conditional refinement rounds.
+   - Trigger refinement when evidence is thin, conflicting, or high-impact on either side.
+   - In each round, create up to 4 targeted follow-up queries from observed claims/entities.
+   - Stop early when evidence is strong, convergent, and high-impact claims are resolved.
+   - Use moderate corroboration for BOTH support and contradiction:
+     - material = at least 2 independent datapoints in-source, OR 1 strong datapoint corroborated by another source.
+     - weak = not sufficiently corroborated; cannot drive recommendation alone.
+   - Treat social low-signal reactions (emoji jokes, one-off comments) as weak warnings unless corroborated.
 
 Save your full report as plain text. This will be passed to a validator agent
 for synthesis.
@@ -134,6 +176,14 @@ Evaluate the evidence and produce a structured assessment:
 
 Be rigorous. A heavily-researched area might mean opportunity (validated
 problem) or risk (many competing solutions). Distinguish carefully.
+
+Evidence reliability rules:
+- Populate `material_supporting_evidence`, `weak_supporting_evidence`, `material_contradictions`, `weak_contradictions`, `deep_dive_actions_taken`, and `evidence_gaps`.
+- Use moderate corroboration for BOTH support and contradiction:
+  - material = at least 2 independent datapoints in-source, OR 1 strong datapoint corroborated by another source.
+  - weak = not sufficiently corroborated.
+- Weak evidence cannot drive recommendation changes alone.
+- One-off social low-signal reactions are weak warnings unless corroborated.
 
 Recommendation rules:
 - Default to skeptical. Academic interest does not guarantee commercial demand.

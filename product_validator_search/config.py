@@ -14,6 +14,11 @@ class ResearchConfiguration:
     critic_model: str = "gemini-3-flash-preview"
     worker_model: str = "gemini-3-flash-preview"
     max_search_iterations: int = 5
+    adaptive_refinement_rounds: int = 2
+    adaptive_run_condition: str = "conditional"
+    adaptive_max_queries_per_round: int = 4
+    evidence_corroboration_bar: str = "moderate"
+    social_weak_signal_max_impact: str = "warning"
     contradiction_penalty: int = 12
     source_evidence_weights: dict[str, float] = field(
         default_factory=lambda: {
